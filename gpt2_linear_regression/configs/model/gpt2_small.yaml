@@ -1,0 +1,17 @@
+# @package _global_
+model:
+  name: gpt2
+  config:
+    vocab_size: 1000  # We'll use a smaller vocab for our numerical data
+    n_positions: 512  # Maximum sequence length
+    n_embd: 768      # Embedding dimension
+    n_layer: 12      # Number of transformer layers
+    n_head: 12       # Number of attention heads
+    n_inner: 3072    # Feed-forward hidden dimension
+    activation_function: gelu_new
+    resid_pdrop: 0.1
+    embd_pdrop: 0.1
+    attn_pdrop: 0.1
+    layer_norm_epsilon: 1e-5
+    initializer_range: 0.02
+    use_cache: false

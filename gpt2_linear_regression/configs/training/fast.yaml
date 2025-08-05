@@ -1,0 +1,32 @@
+# @package _global_
+training:
+  # Optimization parameters
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  epsilon: 1e-8
+  
+  # Training schedule
+  num_epochs: 2             # Just 2 epochs
+  warmup_steps: 10          # Very short warmup
+  max_grad_norm: 1.0
+  
+  # Evaluation
+  eval_every_n_steps: 5     # Eval frequently
+  save_every_n_steps: 20    # Save less frequently
+  
+  # Loss parameters
+  label_smoothing: 0.0
+  
+  # Compilation
+  compile_train_step: true
+  compile_eval_step: true
+  
+  # Logging
+  log_every_n_steps: 2      # Log frequently
+  
+  # Checkpointing
+  save_checkpoints: false   # Skip checkpoints for fast run
+  checkpoint_dir: ./checkpoints
+  max_checkpoints_to_keep: 1

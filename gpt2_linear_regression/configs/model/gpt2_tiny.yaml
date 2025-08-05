@@ -1,0 +1,17 @@
+# @package _global_
+model:
+  name: gpt2_linear
+  config:
+    n_positions: 32   # Short sequences
+    n_embd: 64        # Small embedding
+    n_layer: 2        # Just 2 layers
+    n_head: 2         # 2 attention heads
+    n_inner: 128      # Small FFN
+    output_dim: 1     # Single output for regression
+    activation_function: gelu_new
+    resid_pdrop: 0.1
+    embd_pdrop: 0.1
+    attn_pdrop: 0.1
+    layer_norm_epsilon: 1e-5
+    initializer_range: 0.02
+    use_cache: false

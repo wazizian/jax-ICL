@@ -1,0 +1,22 @@
+# @package _global_
+data:
+  # Data generation parameters
+  input_dim: 3              # Small input dimension
+  sequence_length: 16       # Short sequences
+  num_sequences: 100        # Few training sequences
+  num_test_sequences: 20    # Few test sequences
+  
+  # Gaussian prior parameters for w
+  prior_mean: 0.0
+  prior_std: 1.0
+  
+  # Noise parameters
+  noise_std: 0.1
+  
+  # Data preprocessing
+  normalize_inputs: true
+  x_range: [-2.0, 2.0]
+  
+  # Batch parameters
+  batch_size: 8             # Small batches
+  shuffle: true
