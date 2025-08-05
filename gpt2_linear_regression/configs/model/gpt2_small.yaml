@@ -2,7 +2,6 @@
 model:
   name: gpt2
   config:
-    vocab_size: 1000  # We'll use a smaller vocab for our numerical data
     n_positions: 512  # Maximum sequence length
     n_embd: 768      # Embedding dimension
     n_layer: 12      # Number of transformer layers

@@ -30,10 +30,11 @@ gpt2_linear_regression/
 
 ## Features
 
-- **GPT2 Model**: Full GPT2 implementation using Flax/Linen
+- **GPT2 Linear Model**: GPT2 implementation with linear read-in/read-out layers (no tokenization)
 - **Linear Regression Data**: Synthetic data generation with Gaussian priors
   - Sequences of (x_i, y_i) pairs where y_i = w^T x_i + noise
   - Weight vectors w sampled from Gaussian prior for each sequence
+  - Direct numerical inputs without tokenization
 - **Hydra Configuration**: Modular configuration management
 - **JAX Compilation**: Fully compiled training and evaluation steps
 - **Checkpointing**: Model checkpoint saving and loading
@@ -93,14 +94,14 @@ python train.py --config-name=my_custom_config
 ## Configuration
 
 ### Model Configuration (`configs/model/gpt2_small.yaml`)
-- Vocabulary size, embedding dimension, number of layers
+- Embedding dimension, number of layers
 - Attention heads, dropout rates
 - Initialization parameters
 
 ### Data Configuration (`configs/data/linear_regression.yaml`)
 - Input dimension, sequence length
 - Gaussian prior parameters for weight vectors
-- Noise parameters, tokenization settings
+- Noise parameters and data preprocessing
 - Batch size and data generation parameters
 
 ### Training Configuration (`configs/training/default.yaml`)
@@ -110,17 +111,18 @@ python train.py --config-name=my_custom_config
 
 ## Data Format
 
-The model receives sequences of tokenized (x_i, y_i) pairs:
+The model receives sequences of numerical (x_i, y_i) pairs:
 - Each sequence represents a linear regression problem
 - Format: [x0_0, x0_1, ..., x0_d, y0, x1_0, x1_1, ..., x1_d, y1, ...]
-- Values are discretized into tokens for language modeling
+- Values are processed directly as continuous numbers (no tokenization)
 
 ## Model Architecture
 
-- Standard GPT2 architecture implemented in Flax
+- GPT2 architecture with linear read-in/read-out layers implemented in Flax
 - Causal self-attention with multiple heads
 - Layer normalization and residual connections
-- Language modeling head for next-token prediction
+- Linear read-in layer maps input vectors to embedding space
+- Linear read-out layer maps embeddings to output space
 
 ## Training Features
 
