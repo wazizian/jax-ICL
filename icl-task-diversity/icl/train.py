@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import orbax.checkpoint as ocp
-import tensorflow as tf
 import logging
 from flax import jax_utils
 from flax.core import FrozenDict
