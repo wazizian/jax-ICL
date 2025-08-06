@@ -4,10 +4,10 @@ log_level: INFO
 
 task:
   name: noisy_linear_regression
-  n_tasks: 1048576
-  n_dims: 8
-  n_points: 16
-  batch_size: 256
+  n_tasks: 16
+  n_dims: 2
+  n_points: 4
+  batch_size: 8
   data_seed: 101
   task_seed: 102
   noise_seed: 103
@@ -17,26 +17,26 @@ task:
 
 model:
   name: transformer
-  n_points: 16
-  n_layer: 8
-  n_embd: 128
+  n_points: 4
+  n_layer: 2
+  n_embd: 2
   n_head: 2
   seed: 100
 
 training:
   optimizer: adam
-  lr: 1.0e-3
+  lr: 1.0e-4
   schedule: triangle
-  warmup_steps: 250000
-  total_steps: 500000
+  warmup_steps: 10
+  total_steps: 20
 
 eval:
-  n_samples: 1048576
-  batch_size: 4096
+  n_samples: 16
+  batch_size: 8
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 1000
+  every: 1
 
 # Hydra settings
 hydra:

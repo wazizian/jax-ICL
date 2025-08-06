@@ -16,12 +16,49 @@ Sampler = Callable[[int], tuple[Array, Array, Array]]
 
 
 def get_task_name(task: "Task") -> str:
-    return "Latent" if task.name.endswith("(0)") else "Pretrain"
+    """
+    Get the task type name for evaluation logging.
+    
+    Returns:
+        "Pretrain" for tasks with fresh random task vectors (n_tasks=0)  
+        "Latent" for tasks with fixed task pool (n_tasks>0)
+    """
+    return "Pretrain" if task.name.endswith("(0)") else "Latent"
 
 
 ########################################################################################################################
 # Noisy Linear Regression                                                                                              #
 ########################################################################################################################
+
+"""
+Noisy Linear Regression Task for In-Context Learning
+
+This implements a noisy linear regression task y = w^T x + ε where:
+- x: input data points (n_dims dimensional)  
+- w: task vector (n_dims dimensional)
+- ε: Gaussian noise
+- y: noisy target values
+
+The task supports two evaluation modes based on task distribution:
+
+**Latent Tasks** (n_tasks > 0):
+- Uses a fixed pool of pre-generated task vectors
+- Tasks are sampled from this finite pool during training/evaluation
+- Model can learn the latent structure of this specific task distribution
+- Better for studying how models specialize on repeated task patterns
+- Task name ends with the pool size, e.g., "NoisyLinReg(16)"
+
+**Pretrain Tasks** (n_tasks = 0):  
+- Generates fresh task vectors from Gaussian distribution each time
+- Mimics the diverse task distribution seen during pretraining
+- More challenging as model must generalize to completely novel tasks
+- Better for studying few-shot learning on unseen tasks
+- Task name is "NoisyLinReg(0)"
+
+Evaluation compares Transformer performance against:
+- Ground truth (noise-free predictions)
+- Ridge regression baseline (optimal linear predictor given noise/task scales)
+"""
 
 
 @dataclasses.dataclass

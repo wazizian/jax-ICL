@@ -5,12 +5,11 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import orbax.checkpoint as oc
+import orbax.checkpoint as ocp
 import tensorflow as tf
-from absl import logging
+import logging
 from flax import jax_utils
 from flax.core import FrozenDict
-from flax.training import checkpoints
 from flax.training.train_state import TrainState
 from jax import Array
 from ml_collections import ConfigDict
@@ -36,7 +35,7 @@ def get_sharded_batch_sampler(task: Task) -> Sampler:
 
     def sample_batch(step: int) -> tuple[Array, Array, Array]:
         batch = task.sample_batch(step)
-        batch = jax.tree_map(lambda x: x.reshape(n_devices, -1, *x.shape[1:]), batch)
+        batch = jax.tree.map(lambda x: x.reshape(n_devices, -1, *x.shape[1:]), batch)
         return batch
 
     return sample_batch
@@ -127,38 +126,65 @@ def train(config: ConfigDict) -> None:
     # Loggers
     log = _init_log(bsln_preds, config.task.n_dims)
 
+    # Setup checkpoint manager
+    ckpt_mngr = ocp.CheckpointManager(exp_dir)
+    
     # Training loop
     logging.info("Start Train Loop")
+    train_losses = []
+    epoch_size = max(1, config.eval.every)
+    
     for i in range(1, config.training.total_steps + 1):
         # Train step
         data, _, targets = j_sample_train_batch(i)
+        
+        # Compute loss for logging
+        def compute_loss(state, data, targets):
+            preds = state.apply_fn({"params": state.params}, data, targets, training=False)
+            loss = jnp.square(preds - targets).mean()
+            return loss
+        
+        p_compute_loss = jax.pmap(compute_loss, axis_name="device")
+        loss = p_compute_loss(state, data, targets).mean()
+        train_losses.append(loss.item())
+        
         state = p_train_step(state, data, targets, dropout_rngs)
 
         # Evaluate
         if i % config.eval.every == 0 or i == config.training.total_steps:
+            # Calculate and print average training loss over last epoch
+            recent_losses = train_losses[-epoch_size:]
+            avg_train_loss = sum(recent_losses) / len(recent_losses)
+            
             # Log step and lr
-            logging.info(f"Step: {i}")
+            logging.info(f"Step: {i} | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {lr(i).item():.6f}")
             log["train/step"].append(i)
             log["train/lr"].append(lr(i).item())
+            
             # Evaluate model
             eval_preds = get_model_preds(
                 state, p_eval_step, j_samplers_eval_batch, config.eval.n_samples, config.eval.batch_size
             )
-            # Log model evaluation
+            
+            # Log and print all evaluation metrics
+            logging.info("=== Evaluation Metrics ===")
             for _task_name, _task_preds in bsln_preds.items():
+                logging.info(f"Task: {_task_name}")
                 for _bsln_name, _bsln_preds in _task_preds.items():
                     _errs = mse(eval_preds[_task_name]["Transformer"], _bsln_preds) / config.task.n_dims
+                    avg_err = _errs.mean().item()
                     log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
+                    logging.info(f"  Transformer vs {_bsln_name}: {avg_err:.6f}")
+            logging.info("=========================")
 
-    # Checkpoint - save to Hydra output directory
-    ckpter = oc.AsyncCheckpointer(oc.PyTreeCheckpointHandler())
-    checkpoints.save_checkpoint(str(exp_dir), jax_utils.unreplicate(state), i, orbax_checkpointer=ckpter)
+            # Checkpoint - save to Hydra output directory
+            ckpt_mngr.save(i, args=ocp.args.StandardSave(jax_utils.unreplicate(state)))
 
     # Save logs to Hydra output directory
     with open(exp_dir / "log.json", "w") as f:
         json.dump(log, f, indent=2)
 
     # Wrap up
-    ckpter.wait_until_finished()
+    ckpt_mngr.wait_until_finished()
     jr.normal(jr.PRNGKey(0)).block_until_ready()
     return None

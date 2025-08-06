@@ -1,13 +1,22 @@
 import jax
 import hydra
 from omegaconf import DictConfig
-from absl import logging
+import logging
 from ml_collections import ConfigDict
 
 import icl.utils as u
 from icl.train import train
 
-logging.set_verbosity(logging.INFO)
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s')
+# Reduce verbosity of third-party libraries
+logging.getLogger('orbax').setLevel(logging.WARNING)
+logging.getLogger('jax').setLevel(logging.WARNING)
+logging.getLogger('flax').setLevel(logging.WARNING)
+
+# Also configure absl logging (used by Orbax)
+from absl import logging as absl_logging
+absl_logging.set_verbosity(absl_logging.WARNING)
 
 
 def omega_to_ml_collections(cfg: DictConfig) -> ConfigDict:

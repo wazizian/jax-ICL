@@ -3,13 +3,10 @@ from typing import Any
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax as tfp
 from jax import Array
 
 import icl.utils as u
 from icl.gpt2 import GPT2Config, GPT2Model, init_fn
-
-tfd = tfp.distributions
 
 
 ########################################################################################################################
@@ -151,7 +148,8 @@ class DiscreteMMSE(nn.Module):
             batch_size (float)
         """
         # X @ W is batch_size x i x n_tasks, Y is batch_size x i x 1, so broadcasts to alpha being batch_size x n_tasks
-        alpha = tfd.Normal(0, scale).log_prob(Y - jnp.matmul(X, W, precision=jax.lax.Precision.HIGHEST)).astype(self.dtype).sum(axis=1)
+        # alpha = tfd.Normal(0, scale).log_prob(Y - jnp.matmul(X, W, precision=jax.lax.Precision.HIGHEST)).astype(self.dtype).sum(axis=1)
+        alpha = jax.scipy.stats.norm.logpdf(Y - jnp.matmul(X, W, precision=jax.lax.Precision.HIGHEST), loc=0, scale=scale).astype(self.dtype).sum(axis=1)
         # softmax is batch_size x n_tasks, W.T is n_tasks x n_dims, so w_mmse is batch_size x n_dims x 1
         w_mmse = jnp.expand_dims(jnp.matmul(jax.nn.softmax(alpha, axis=1), W.T, precision=jax.lax.Precision.HIGHEST), -1)
         # test_x is batch_size x 1 x n_dims, so pred is batch_size x 1 x 1. NOTE: @ should be ok (batched row times column)
