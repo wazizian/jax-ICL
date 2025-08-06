@@ -1,0 +1,41 @@
+dtype: float32
+work_dir: ""  # Specify working directory
+
+task:
+  name: noisy_linear_regression
+  n_tasks: 16
+  n_dims: 8
+  n_points: 16
+  batch_size: 8
+  data_seed: 101
+  task_seed: 102
+  noise_seed: 103
+  data_scale: 1.0
+  task_scale: 1.0
+  noise_scale: 0.5
+
+model:
+  name: transformer
+  n_points: 16
+  n_layer: 2
+  n_embd: 8
+  n_head: 2
+  seed: 100
+
+training:
+  optimizer: adam
+  lr: 1.0e-3
+  schedule: triangle
+  warmup_steps: 250
+  total_steps: 500
+
+eval:
+  n_samples: 10
+  batch_size: 8
+  data_seed: 104
+  task_seed: 105
+  noise_seed: 106
+  every: 1000
+
+wandb:
+  project: ""  # Specify wandb project
