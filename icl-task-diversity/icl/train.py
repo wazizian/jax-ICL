@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -13,9 +14,9 @@ from flax.training import checkpoints
 from flax.training.train_state import TrainState
 from jax import Array
 from ml_collections import ConfigDict
+from hydra.core.hydra_config import HydraConfig
 
 import icl.utils as u
-import wandb
 from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse
 from icl.models import Transformer, get_model
 from icl.optim import get_optimizer_and_lr_schedule
@@ -74,17 +75,22 @@ def _init_log(bsln_preds: Preds, n_dims: int) -> dict:
 
 
 def train(config: ConfigDict) -> None:
-    # Setup train experiment
+    # Setup train experiment with Hydra output directory
+    hydra_cfg = HydraConfig.get()
+    exp_dir = Path(hydra_cfg.runtime.output_dir)
     exp_name = f"train_{u.get_hash(config)}"
-    exp_dir = os.path.join(config.work_dir, exp_name)
-    logging.info(f"Train Experiment\nNAME: {exp_name}\nCONFIG:\n{config}")
+    
+    logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\nCONFIG:\n{config}")
+    
     # Experiment completed?
-    if tf.io.gfile.exists(os.path.join(exp_dir, "log.json")):
+    log_file = exp_dir / "log.json"
+    if log_file.exists():
         logging.info(f"{exp_name} already completed")
         return None
-    # Config
-    tf.io.gfile.makedirs(exp_dir)
-    with tf.io.gfile.GFile(os.path.join(exp_dir, "config.json"), "w") as f:
+    
+    # Config is already saved by Hydra, but save our version too
+    config_file = exp_dir / "config.json"
+    with open(config_file, "w") as f:
         f.write(config.to_json())
 
     # Model, optimizer and lr schedule
@@ -120,7 +126,6 @@ def train(config: ConfigDict) -> None:
 
     # Loggers
     log = _init_log(bsln_preds, config.task.n_dims)
-    wandb.init(config=config.to_dict(), name=exp_name, **config.wandb)
 
     # Training loop
     logging.info("Start Train Loop")
@@ -135,7 +140,6 @@ def train(config: ConfigDict) -> None:
             logging.info(f"Step: {i}")
             log["train/step"].append(i)
             log["train/lr"].append(lr(i).item())
-            wandb.log({"train/lr": lr(i).item()}, step=i)
             # Evaluate model
             eval_preds = get_model_preds(
                 state, p_eval_step, j_samplers_eval_batch, config.eval.n_samples, config.eval.batch_size
@@ -145,15 +149,14 @@ def train(config: ConfigDict) -> None:
                 for _bsln_name, _bsln_preds in _task_preds.items():
                     _errs = mse(eval_preds[_task_name]["Transformer"], _bsln_preds) / config.task.n_dims
                     log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
-                    wandb.log({f"eval/{_task_name}/{_bsln_name}": _errs.mean().item()}, step=i)
 
-    # Checkpoint
+    # Checkpoint - save to Hydra output directory
     ckpter = oc.AsyncCheckpointer(oc.PyTreeCheckpointHandler())
-    checkpoints.save_checkpoint(exp_dir, jax_utils.unreplicate(state), i, orbax_checkpointer=ckpter)
+    checkpoints.save_checkpoint(str(exp_dir), jax_utils.unreplicate(state), i, orbax_checkpointer=ckpter)
 
-    # Save logs
-    with tf.io.gfile.GFile(os.path.join(exp_dir, "log.json"), "w") as f:
-        f.write(json.dumps(log))
+    # Save logs to Hydra output directory
+    with open(exp_dir / "log.json", "w") as f:
+        json.dump(log, f, indent=2)
 
     # Wrap up
     ckpter.wait_until_finished()
