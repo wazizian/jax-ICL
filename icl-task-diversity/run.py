@@ -5,8 +5,6 @@ from ml_collections import config_flags
 import icl.utils as u
 from icl.train import train
 
-jax.distributed.initialize()
-
 logging.set_verbosity(logging.INFO)
 
 FLAGS = flags.FLAGS

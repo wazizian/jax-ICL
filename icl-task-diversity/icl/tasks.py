@@ -114,13 +114,6 @@ class NoisyLinearRegression:
 
     def get_default_eval_models(self) -> list[Model]:
         models = [get_model(name="ridge", lam=self.noise_scale**2 / self.task_scale**2, dtype=self.dtype)]
-        if self.n_tasks > 0:
-            assert self.task_scale == 1.0  # TODO
-            models.append(
-                get_model(
-                    name="discrete_mmse", scale=self.noise_scale, task_pool=self.task_pool.copy(), dtype=self.dtype
-                )
-            )
         return models
 
 

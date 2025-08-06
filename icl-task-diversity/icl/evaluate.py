@@ -55,6 +55,7 @@ def get_bsln_preds(train_task: Task, j_batch_samplers: dict[str, Sampler], n_sam
             _, _, n_points = ys.shape
             preds[task_name]["True"].append(p_oracle(xs, ws).reshape(batch_size, n_points))  # ...for oracle
             for model_name, p_model in p_bsln_models.items():  # ...for baseline models
+                # print(f"Evaluating {model_name} on {task_name} batch {i} with {xs.shape[0]} samples and {n_points} points ({xs.shape = }, {ws.shape = }, {ys.shape = })")
                 preds[task_name][model_name].append(p_model(xs, ys).reshape(batch_size, n_points))
         # Concatenate preds
         preds[task_name]["True"] = jnp.concatenate(preds[task_name]["True"])
