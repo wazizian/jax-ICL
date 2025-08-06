@@ -52,11 +52,16 @@ class Transformer(nn.Module):
         self._out = nn.Dense(1, False, self.dtype, kernel_init=init_fn)
 
     def __call__(self, data: Array, targets: Array, attention_mask: Array, training: bool = False) -> Array:
-        input_seq = u.to_seq(data, targets)
+        # Get actual sequence length before padding
+        actual_seq_len = data.shape[1]
+        
+        # Pad input sequence to match the model's expected block_size
+        target_seq_len = self.n_points  # Expected number of data points
+        input_seq = u.to_seq(data, targets, target_seq_len=target_seq_len)
         embds = self._in(input_seq)
         outputs = self._h(input_embds=embds, attention_mask=attention_mask, training=training)
         preds = self._out(outputs)
-        preds = u.seq_to_targets(preds)
+        preds = u.seq_to_targets(preds, actual_seq_len=actual_seq_len)
         return preds
 
 

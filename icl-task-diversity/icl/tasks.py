@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Callable
+from typing import Any, Callable, List
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +23,9 @@ def get_task_name(task: "Task") -> str:
         "Pretrain" for tasks with fresh random task vectors (n_tasks=0)  
         "Latent" for tasks with fixed task pool (n_tasks>0)
     """
-    return "Pretrain" if task.name.endswith("(0)") else "Latent"
+    main_name = "Test Tasks" if task.name.endswith("(0)") else "Train tasks"
+    context_length = task.n_points
+    return f"{main_name} ({context_length})"
 
 
 ########################################################################################################################
@@ -87,6 +89,7 @@ class NoisyLinearRegression:
     task_scale: float
     noise_scale: float
     dtype: Any
+    n_max_points: int | None = None  # Optional, used for padding in some models
 
     def __post_init__(self):
         self.data_key = jax.random.PRNGKey(self.data_seed)
@@ -94,6 +97,7 @@ class NoisyLinearRegression:
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
         self.task_pool = self.generate_task_pool() if self.n_tasks > 0 else None
         self.data_pool = self.generate_data_pool() if self.n_data > 0 else None
+        self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
 
     @property
     def name(self) -> str:
@@ -145,9 +149,24 @@ class NoisyLinearRegression:
         return targets + noise
 
     def generate_attention_mask(self) -> Array:
-        """Generate attention mask for the sequence."""
-        seq_len = 2 * self.n_points  # Interleaved (x, y) pairs
-        mask = jnp.tril(jnp.ones((seq_len, seq_len))).astype(bool)
+        """Generate causal attention mask for the sequence with right padding.
+        
+        Creates a mask of size (2*n_max_points, 2*n_max_points) where:
+        - First 2*n_points positions are valid (actual data) 
+        - Remaining positions are padded and masked out (right padding)
+        - Within valid positions, uses causal attention (can only attend to previous positions)
+        """
+        effective_seq_len = 2 * self.n_points      # Valid data: positions 0 to this-1
+        max_seq_len = 2 * self.n_max_points        # Total padded length
+        
+        # Start with all positions masked (False)
+        mask = jnp.zeros((max_seq_len, max_seq_len), dtype=bool)
+        
+        # Valid region gets causal attention pattern
+        valid_mask = jnp.tril(jnp.ones((effective_seq_len, effective_seq_len))).astype(bool)
+        
+        # Insert valid causal mask into full mask 
+        mask = mask.at[:effective_seq_len, :effective_seq_len].set(valid_mask)
         return mask
 
     def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
@@ -162,7 +181,7 @@ class NoisyLinearRegression:
         return targets
 
     def get_default_eval_tasks(
-        self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, **kwargs
+            self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], **kwargs
     ) -> list["NoisyLinearRegression"]:
         del kwargs
         assert task_seed != self.task_seed
@@ -175,7 +194,12 @@ class NoisyLinearRegression:
         config["noise_seed"] = noise_seed
         config["n_tasks"] = 0
         config["n_data"] = 0
-        eval_tasks = [self.__class__(**config)]
+        config["n_max_points"] = self.n_max_points
+        eval_tasks = []
+        for n_points in eval_n_points:
+            assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
+            config["n_points"] = n_points
+            eval_tasks.append(self.__class__(**config))
         if self.n_tasks > 0:
             config["n_tasks"] = self.n_tasks
             eval_tasks.append(NoisyLinearRegression.from_task_pool(**config, task_pool=self.task_pool.copy()))

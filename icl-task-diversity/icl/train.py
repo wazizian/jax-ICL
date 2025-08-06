@@ -101,10 +101,11 @@ def train(config: ConfigDict) -> None:
         logging.info(f"{exp_name} already completed")
         return None
     
-    # Config is already saved by Hydra, but save our version too
+    # Config is already saved by Hydra, but save our version too  
     config_file = exp_dir / "config.json"
     with open(config_file, "w") as f:
-        f.write(config.to_json())
+        serializable_config = u._convert_for_json(config)
+        f.write(json.dumps(serializable_config, indent=2))
 
     # Model, optimizer and lr schedule
     model = get_model(**config.model, dtype=jnp.dtype(config.dtype))
