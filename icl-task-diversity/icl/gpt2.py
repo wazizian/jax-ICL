@@ -16,6 +16,7 @@ class GPT2Config:
     n_embd: int
     dropout: float = 0.0
     bias: bool = True
+    use_causal_mask: bool = True
     dtype: Any = jnp.float32
 
 
@@ -38,14 +39,16 @@ class GPT2SelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(self.config.dropout)
         self.resid_droput = nn.Dropout(self.config.dropout)
 
-    def __call__(self, x: Array, training: bool = False) -> Array:
+    def __call__(self, x: Array, attention_mask: Array, training: bool = False) -> Array:
         B, T, C = x.shape  # batch_size, block_size, n_embd
         q, k, v = jnp.split(self.c_attn(x), 3, axis=2)
         q = q.reshape(B, T, self.config.n_head, C // self.config.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
         k = k.reshape(B, T, self.config.n_head, C // self.config.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
         v = v.reshape(B, T, self.config.n_head, C // self.config.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
-        mask = jnp.tril(jnp.ones((1, 1, self.config.block_size, self.config.block_size))).astype(bool)
+        
         att = q @ k.transpose(0, 1, 3, 2) / jnp.sqrt(k.shape[-1])  # (B, nh, T, T)
+        # attention_mask shape: (B, T, T) -> expand to (B, 1, T, T) for broadcasting across heads
+        mask = attention_mask[:, None, :, :]  # Add head dimension
         att = jnp.where(mask, att, jnp.finfo(self.config.dtype).min)
         att = nn.softmax(att, axis=-1)
         att = self.attn_dropout(att, deterministic=not training)
@@ -82,8 +85,8 @@ class GPT2Block(nn.Module):
         self.ln_2 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
         self.mlp = GPT2MLP(self.config)
 
-    def __call__(self, x: Array, training: bool = False) -> Array:
-        x = x + self.attn(self.ln_1(x), training=training)
+    def __call__(self, x: Array, attention_mask: Array, training: bool = False) -> Array:
+        x = x + self.attn(self.ln_1(x), attention_mask, training=training)
         x = x + self.mlp(self.ln_2(x), training=training)
         return x
 
@@ -97,12 +100,12 @@ class GPT2Model(nn.Module):
         self.hs = [GPT2Block(self.config) for _ in range(self.config.n_layer)]
         self.ln_f = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
 
-    def __call__(self, input_embds: Array, training: bool = False) -> Array:
+    def __call__(self, input_embds: Array, attention_mask: Array, training: bool = False) -> Array:
         pos = jnp.expand_dims(jnp.arange(self.config.block_size), axis=0)  # (1, T)
         pos_embds = self.wpe(pos)  # (1, T, n_embd)
         x = input_embds + pos_embds  #  (B, T, n_embd)
         x = self.drop(x, deterministic=not training)
         for h in self.hs:
-            x = h(x, training=training)
+            x = h(x, attention_mask, training=training)
         x = self.ln_f(x)
         return x

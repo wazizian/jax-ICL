@@ -44,16 +44,17 @@ class Transformer(nn.Module):
             n_layer=self.n_layer,
             n_head=self.n_head,
             n_embd=self.n_embd,
+            use_causal_mask=True,  # Default value, overridden by attention_mask
             dtype=self.dtype,
         )
         self._in = nn.Dense(self.n_embd, False, self.dtype, kernel_init=init_fn)
         self._h = GPT2Model(config)
         self._out = nn.Dense(1, False, self.dtype, kernel_init=init_fn)
 
-    def __call__(self, data: Array, targets: Array, training: bool = False) -> Array:
+    def __call__(self, data: Array, targets: Array, attention_mask: Array, training: bool = False) -> Array:
         input_seq = u.to_seq(data, targets)
         embds = self._in(input_seq)
-        outputs = self._h(input_embds=embds, training=training)
+        outputs = self._h(input_embds=embds, attention_mask=attention_mask, training=training)
         preds = self._out(outputs)
         preds = u.seq_to_targets(preds)
         return preds

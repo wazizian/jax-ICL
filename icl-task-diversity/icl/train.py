@@ -25,26 +25,41 @@ def initialize(model: Transformer, config: ConfigDict) -> tuple[FrozenDict, Arra
     params_rng, dropout_rng = jr.split(jr.PRNGKey(config.model.seed))
     dummy_data = jnp.ones((config.task.batch_size, config.task.n_points, config.task.n_dims), dtype=model.dtype)
     dummy_targets = jnp.ones((config.task.batch_size, config.task.n_points), dtype=model.dtype)
-    variables = jax.jit(model.init)(params_rng, dummy_data, dummy_targets)
+    dummy_mask = jnp.ones((config.task.batch_size, 2 * config.task.n_points, 2 * config.task.n_points)).astype(bool)
+    variables = jax.jit(model.init)(params_rng, dummy_data, dummy_targets, dummy_mask)
     return variables["params"], dropout_rng
 
 
 def get_sharded_batch_sampler(task: Task) -> Sampler:
     n_devices = jax.local_device_count()
 
-    def sample_batch(step: int) -> tuple[Array, Array, Array]:
-        batch = task.sample_batch(step)
-        batch = jax.tree.map(lambda x: x.reshape(n_devices, -1, *x.shape[1:]), batch)
-        return batch
+    def sample_batch(step: int) -> tuple[Array, Array, Array, Array]:
+        data, tasks, targets, attention_mask = task.sample_batch(step)
+        batch_size = data.shape[0]
+        batch_per_device = batch_size // n_devices
+        
+        # Shard data across devices  
+        data = data.reshape(n_devices, batch_per_device, *data.shape[1:])
+        tasks = tasks.reshape(n_devices, batch_per_device, *tasks.shape[1:])  
+        targets = targets.reshape(n_devices, batch_per_device, *targets.shape[1:])
+        
+        # Expand attention mask to match batch dimensions
+        # From (seq_len, seq_len) to (n_devices, batch_per_device, seq_len, seq_len)
+        attention_mask = jnp.broadcast_to(
+            attention_mask[None, None, :, :], 
+            (n_devices, batch_per_device, *attention_mask.shape)
+        )
+        
+        return data, tasks, targets, attention_mask
 
     return sample_batch
 
 
-def train_step(state: TrainState, data: Array, targets: Array, dropout_rng: Array) -> TrainState:
+def train_step(state: TrainState, data: Array, targets: Array, attention_mask: Array, dropout_rng: Array) -> TrainState:
     dropout_rng = jr.fold_in(dropout_rng, state.step + 1)
 
     def loss_fn(params):
-        preds = state.apply_fn({"params": params}, data, targets, training=True, rngs={"dropout": dropout_rng})
+        preds = state.apply_fn({"params": params}, data, targets, attention_mask, training=True, rngs={"dropout": dropout_rng})
         loss = jnp.square(preds - targets).mean()
         return loss, preds
 
@@ -55,8 +70,8 @@ def train_step(state: TrainState, data: Array, targets: Array, dropout_rng: Arra
     return state
 
 
-def eval_step(state: TrainState, data: Array, targets: Array) -> Array:
-    preds = state.apply_fn({"params": state.params}, data, targets, training=False)
+def eval_step(state: TrainState, data: Array, targets: Array, attention_mask: Array) -> Array:
+    preds = state.apply_fn({"params": state.params}, data, targets, attention_mask, training=False)
     return preds
 
 
@@ -135,19 +150,19 @@ def train(config: ConfigDict) -> None:
     
     for i in range(1, config.training.total_steps + 1):
         # Train step
-        data, _, targets = j_sample_train_batch(i)
+        data, _, targets, attention_mask = j_sample_train_batch(i)
         
         # Compute loss for logging
-        def compute_loss(state, data, targets):
-            preds = state.apply_fn({"params": state.params}, data, targets, training=False)
+        def compute_loss(state, data, targets, attention_mask):
+            preds = state.apply_fn({"params": state.params}, data, targets, attention_mask, training=False)
             loss = jnp.square(preds - targets).mean()
             return loss
         
         p_compute_loss = jax.pmap(compute_loss, axis_name="device")
-        loss = p_compute_loss(state, data, targets).mean()
+        loss = p_compute_loss(state, data, targets, attention_mask).mean()
         train_losses.append(loss.item())
         
-        state = p_train_step(state, data, targets, dropout_rngs)
+        state = p_train_step(state, data, targets, attention_mask, dropout_rngs)
 
         # Evaluate
         if i % config.eval.every == 0 or i == config.training.total_steps:

@@ -38,4 +38,5 @@ def seq_to_targets(seq: Array) -> Array:
 def tabulate_model(model: Transformer, n_dims: int, n_points: int, batch_size: int) -> str:
     dummy_data = jnp.ones((batch_size, n_points, n_dims), dtype=model.dtype)
     dummy_targets = jnp.ones((batch_size, n_points), dtype=model.dtype)
-    return model.tabulate(jr.PRNGKey(0), dummy_data, dummy_targets, training=False, depth=0)
+    dummy_mask = jnp.ones((batch_size, 2 * n_points, 2 * n_points)).astype(bool)
+    return model.tabulate(jr.PRNGKey(0), dummy_data, dummy_targets, dummy_mask, training=False, depth=0)

@@ -12,7 +12,7 @@ from icl.models import Model, get_model
 ########################################################################################################################
 
 
-Sampler = Callable[[int], tuple[Array, Array, Array]]
+Sampler = Callable[[int], tuple[Array, Array, Array, Array]]
 
 
 def get_task_name(task: "Task") -> str:
@@ -144,10 +144,17 @@ class NoisyLinearRegression:
         noise = jax.random.normal(key, targets.shape, self.dtype) * self.noise_scale
         return targets + noise
 
-    def sample_batch(self, step: int) -> tuple[Array, Array, Array]:
+    def generate_attention_mask(self) -> Array:
+        """Generate attention mask for the sequence."""
+        seq_len = 2 * self.n_points  # Interleaved (x, y) pairs
+        mask = jnp.tril(jnp.ones((seq_len, seq_len))).astype(bool)
+        return mask
+
+    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
         data, tasks = self.sample_data(step), self.sample_tasks(step)
         targets = self.evaluate(data, tasks, step)
-        return data, tasks, targets
+        attention_mask = self.generate_attention_mask()
+        return data, tasks, targets, attention_mask
 
     @staticmethod
     def evaluate_oracle(data: Array, tasks: Array) -> Array:
