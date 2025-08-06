@@ -62,7 +62,7 @@ def eval_step(state: TrainState, data: Array, targets: Array) -> Array:
 
 
 def _init_log(bsln_preds: Preds, n_dims: int) -> dict:
-    log = {"train/step": [], "train/lr": []}
+    log = {"train/step": [], "train/lr": [], "train/loss": []}
     for _task_name, _task_preds in bsln_preds.items():
         log[f"eval/{_task_name}"] = {}
         for _bsln_name, _bsln_preds in _task_preds.items():
@@ -157,9 +157,10 @@ def train(config: ConfigDict) -> None:
             avg_train_loss = sum(recent_losses) / len(recent_losses)
             
             # Log step and lr
-            logging.info(f"Step: {i} | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {lr(i).item():.6f}")
+            logging.info(f"Step: {i} | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {float(lr(i)):.6f}")
             log["train/step"].append(i)
-            log["train/lr"].append(lr(i).item())
+            log["train/lr"].append(float(lr(i)))
+            log["train/loss"].append(avg_train_loss)
             
             # Evaluate model
             eval_preds = get_model_preds(

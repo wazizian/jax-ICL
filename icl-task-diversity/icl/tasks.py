@@ -55,6 +55,18 @@ The task supports two evaluation modes based on task distribution:
 - Better for studying few-shot learning on unseen tasks
 - Task name is "NoisyLinReg(0)"
 
+The task also supports two data sampling modes:
+
+**Fixed Data Pool** (n_data > 0):
+- Uses a fixed pool of pre-generated data points
+- Data points are sampled from this finite pool during training/evaluation
+- Allows studying performance on repeated data patterns
+
+**Fresh Data Sampling** (n_data = 0):
+- Generates fresh data points from Gaussian distribution each time
+- Each batch contains completely novel data points
+- Default behavior for maximum data diversity
+
 Evaluation compares Transformer performance against:
 - Ground truth (noise-free predictions)
 - Ridge regression baseline (optimal linear predictor given noise/task scales)
@@ -64,6 +76,7 @@ Evaluation compares Transformer performance against:
 @dataclasses.dataclass
 class NoisyLinearRegression:
     n_tasks: int
+    n_data: int
     n_dims: int
     n_points: int
     batch_size: int
@@ -80,6 +93,7 @@ class NoisyLinearRegression:
         self.task_key = jax.random.PRNGKey(self.task_seed)
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
         self.task_pool = self.generate_task_pool() if self.n_tasks > 0 else None
+        self.data_pool = self.generate_data_pool() if self.n_data > 0 else None
 
     @property
     def name(self) -> str:
@@ -98,10 +112,20 @@ class NoisyLinearRegression:
         tasks = jax.random.normal(key, shape, self.dtype) * self.task_scale
         return tasks
 
+    def generate_data_pool(self) -> Array:
+        key = jax.random.fold_in(self.data_key, 0)
+        shape = self.n_data, self.n_points, self.n_dims
+        data = jax.random.normal(key, shape, self.dtype) * self.data_scale
+        return data
+
     def sample_data(self, step: int) -> Array:
         key = jax.random.fold_in(self.data_key, step)
-        shape = self.batch_size, self.n_points, self.n_dims
-        data = jax.random.normal(key, shape, self.dtype) * self.data_scale
+        if self.n_data > 0:
+            idxs = jax.random.choice(key, self.n_data, (self.batch_size,))
+            data = self.data_pool[idxs]
+        else:
+            shape = self.batch_size, self.n_points, self.n_dims
+            data = jax.random.normal(key, shape, self.dtype) * self.data_scale
         return data
 
     def sample_tasks(self, step: int) -> Array:
@@ -143,6 +167,7 @@ class NoisyLinearRegression:
         config["data_seed"] = data_seed
         config["noise_seed"] = noise_seed
         config["n_tasks"] = 0
+        config["n_data"] = 0
         eval_tasks = [self.__class__(**config)]
         if self.n_tasks > 0:
             config["n_tasks"] = self.n_tasks
