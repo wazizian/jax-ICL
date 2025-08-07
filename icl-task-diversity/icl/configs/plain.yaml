@@ -17,6 +17,7 @@ task:
   noise_scale: 0.5
   clip: 10.0
   use_weights: false
+  eval_ridge: false
 
 model:
   name: transformer
@@ -41,7 +42,6 @@ eval:
   noise_seed: 106
   every: 5_000
   eval_n_points: 128
-  eval_ridge: false
   task_centers:
     - 0.5
     - 1.0
