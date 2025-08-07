@@ -64,7 +64,9 @@ def train_step(state: TrainState, data: Array, weights: Array, targets: Array, a
         preds = state.apply_fn({"params": params}, data, targets, attention_mask, training=True, rngs={"dropout": dropout_rng})
         # Compute weighted loss: weights should have shape (batch_size,)
         batch_losses = jnp.square(preds - targets).mean(axis=1)  # Mean over sequence length
-        weighted_loss = jnp.sum(batch_losses * weights)
+        jax.debug.print("Weights: mean={}, median={}, min={}, max={}",
+                        jnp.mean(weights), jnp.median(weights), jnp.min(weights), jnp.max(weights))
+        weighted_loss = jnp.mean(batch_losses * weights)
         return weighted_loss, preds
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)

@@ -55,6 +55,25 @@ def task_log_weights(
         log_weights = jax.scipy.stats.truncnorm.logpdf(tasks, -clip, clip, loc=loc, scale=scale)
     return - jnp.sum(log_weights, axis=reduce_axis)  # IMPORTANT: minus
 
+def task_weights_trunc_norm_factor(
+        loc: float,
+        scale: float,
+        clip: float | None,
+        use_weights: bool,
+        n_dims: int
+        ) -> float:
+    if not use_weights:
+        return 1.0
+    # Compute integral of exp(-log_weights) over R^d
+    assert clip is not None, "clip must be specified to compute normalization factor"
+    x = jnp.linspace(-clip, clip, 1000)
+    Z_1d = jax.numpy.trapezoid(
+            jnp.exp(-jax.scipy.stats.truncnorm.logpdf(x, -clip, clip, loc=loc, scale=scale)),
+            x,
+            )
+    jax.debug.print("Trunc norm factor 1d: {}", Z_1d)
+    return Z_1d ** n_dims
+
 
 ########################################################################################################################
 # Noisy Linear Regression                                                                                              #
@@ -180,6 +199,9 @@ class NoisyLinearRegression:
             shape = self.batch_size, self.n_dims, 1
             tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
             weights = jnp.exp(task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1))
+            # norm_factor = task_weights_trunc_norm_factor(self.task_center, self.task_scale, self.clip, self.use_weights, self.n_dims)
+            norm_factor = jnp.sum(weights) / self.batch_size  # Empirical normalization
+            weights = weights / norm_factor
         return tasks, weights
 
     @jax.jit
@@ -239,6 +261,7 @@ class NoisyLinearRegression:
         config["n_tasks"] = 0
         config["n_data"] = 0
         config["n_max_points"] = self.n_max_points
+        config["use_weights"] = False
         eval_tasks = []
         n_points = eval_n_points
         assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
