@@ -29,8 +29,8 @@ training:
   optimizer: adam
   lr: 1.0e-3
   schedule: warmup_cosine_decay
-  warmup_steps: 5_000
-  total_steps: 100_000
+  warmup_steps: 2_000
+  total_steps: 20_000
 
 eval:
   n_samples: 2048
@@ -38,7 +38,7 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 10_000
+  every: 5_000
   eval_n_points: 128
   eval_ridge: false
   task_centers:

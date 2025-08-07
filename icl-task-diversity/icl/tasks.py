@@ -4,6 +4,7 @@ from typing import Any, Callable, List
 import jax
 import jax.numpy as jnp
 from jax import Array, tree_util
+from functools import partial
 
 from icl.models import Model, get_model
 
@@ -17,6 +18,45 @@ Sampler = Callable[[int], tuple[Array, Array, Array, Array]]
 
 def get_task_name(task: "Task") -> str:
     return task.name 
+
+@partial(jax.jit, static_argnames=("shape", "dtype"))
+def sample_conditioned_multivariate_gaussian(
+        key: jax.random.PRNGKey,
+        loc: Array,
+        scale: Array,
+        clip: float,
+        shape: tuple[int, ...],
+        dtype: Any = jnp.float32
+        ) -> Array:
+    def cond_fun(val):
+        _, x = val
+        return jnp.any(jnp.abs(x) > clip)
+
+    def body_fun(val):
+        key, x = val
+        key, subkey = jax.random.split(key)
+        new_sample = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
+        new_x = jax.lax.select(jnp.abs(x) > clip, new_sample, x)
+        return key, new_x
+
+    key, subkey = jax.random.split(key)
+    init_x = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
+    init_val = (key, init_x)
+    _, final_x = jax.lax.while_loop(cond_fun, body_fun, init_val)
+    return final_x 
+
+def sample_multivariate_gaussian(
+        key: jax.random.PRNGKey,
+        loc: Array,
+        scale: Array,
+        clip: float,
+        shape: tuple[int, ...],
+        dtype: Any = jnp.float32
+        ) -> Array:
+    if clip is not None:
+        return sample_conditioned_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
+    else:
+        return jax.random.normal(key, shape=shape, dtype=dtype) * scale + loc
 
 ########################################################################################################################
 # Noisy Linear Regression                                                                                              #
@@ -105,9 +145,7 @@ class NoisyLinearRegression:
     def generate_task_pool(self) -> Array:
         key = jax.random.fold_in(self.task_key, 0)
         shape = self.n_tasks, self.n_dims, 1
-        tasks = jax.random.normal(key, shape, self.dtype) * self.task_scale + self.task_center
-        if self.clip is not None:
-            tasks = jnp.clip(tasks, -self.clip, self.clip)
+        tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
         return tasks
 
     def generate_data_pool(self) -> Array:
@@ -135,9 +173,8 @@ class NoisyLinearRegression:
             tasks = self.task_pool[idxs]
         else:
             shape = self.batch_size, self.n_dims, 1
-            tasks = jax.random.normal(key, shape, self.dtype) * self.task_scale
-            if self.clip is not None:
-                tasks = jnp.clip(tasks, -self.clip, self.clip)
+            tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
+        # jax.debug.print("Sampled tasks max value: {max_value}", max_value=jnp.max(jnp.abs(tasks)))
         return tasks
 
     @jax.jit
