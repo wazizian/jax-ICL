@@ -26,6 +26,7 @@ model:
   n_embd: 32
   n_head: 2
   seed: 100
+  use_ln: true
 
 training:
   optimizer: adam

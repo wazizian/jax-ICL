@@ -37,6 +37,7 @@ class Transformer(nn.Module):
     n_head: int
     seed: int
     dtype: Any
+    use_ln: bool = True
 
     def setup(self):
         config = GPT2Config(
@@ -44,8 +45,8 @@ class Transformer(nn.Module):
             n_layer=self.n_layer,
             n_head=self.n_head,
             n_embd=self.n_embd,
-            use_causal_mask=True,  # Default value, overridden by attention_mask
             dtype=self.dtype,
+            use_ln=self.use_ln,
         )
         self._in = nn.Dense(self.n_embd, False, self.dtype, kernel_init=init_fn)
         self._h = GPT2Model(config)

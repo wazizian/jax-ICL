@@ -16,8 +16,8 @@ class GPT2Config:
     n_embd: int
     dropout: float = 0.0
     bias: bool = True
-    use_causal_mask: bool = True
     dtype: Any = jnp.float32
+    use_ln: bool = True
 
 
 # Linear weights and Embedding weights are initialized with mean 0, stddev 0.02 normal random variables.
@@ -86,8 +86,12 @@ class GPT2Block(nn.Module):
         self.mlp = GPT2MLP(self.config)
 
     def __call__(self, x: Array, attention_mask: Array, training: bool = False) -> Array:
-        x = x + self.attn(self.ln_1(x), attention_mask, training=training)
-        x = x + self.mlp(self.ln_2(x), training=training)
+        if self.config.use_ln:
+            x = x + self.attn(self.ln_1(x), attention_mask, training=training)
+            x = x + self.mlp(self.ln_2(x), training=training)
+        else:
+            x = x + self.attn(x, attention_mask, training=training)
+            x = x + self.mlp(x, training=training)
         return x
 
 
@@ -107,5 +111,6 @@ class GPT2Model(nn.Module):
         x = self.drop(x, deterministic=not training)
         for h in self.hs:
             x = h(x, attention_mask, training=training)
-        x = self.ln_f(x)
+        if self.config.use_ln:
+            x = self.ln_f(x)
         return x
