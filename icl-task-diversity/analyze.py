@@ -140,8 +140,14 @@ def print_summary(log: dict, run_id: str):
                     print(f"  {metric_name}: {final_mse:.6f}")
 
 
-def plot_mse_vs_context_length(log: dict, run_id: str):
-    """Plot MSE of transformer vs true as a function of context length at final iteration."""
+def plot_icl_for_all_steps(log: dict, run_id: str):
+    """Plot MSE vs context length for every evaluation step."""
+    eval_steps = log.get("eval/step", [])
+    if not eval_steps:
+        print("No evaluation steps found in log")
+        return
+    
+    # Extract evaluation metrics
     eval_metrics = {}
     for key, value in log.items():
         if key.startswith("eval/") and key != "eval/step":
@@ -151,41 +157,48 @@ def plot_mse_vs_context_length(log: dict, run_id: str):
             for metric_name, metric_values in value.items():
                 eval_metrics[task_name][metric_name] = metric_values
     
-    plt.figure(figsize=(12, 8))
+    # Create output directory for ICL plots
+    icl_dir = Path("outputs") / run_id / "icl_plots"
+    icl_dir.mkdir(exist_ok=True)
     
-    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
-    color_idx = 0
+    # Colors for different tasks
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
     
-    for task_name, metrics in eval_metrics.items():
-        for metric_name, values in metrics.items():
-            if "Transformer | True" in metric_name and values:
-                # Get the final evaluation (last iteration)
-                final_mse_by_position = values[-1]  # List of MSE values by position
-                n_points = len(final_mse_by_position)
-                positions = list(range(1, n_points + 1))  # Context length positions
-                
-                plt.plot(positions, final_mse_by_position,
-                        color=colors[color_idx % len(colors)],
-                        linewidth=2,
-                        marker='o',
-                        markersize=6,
-                        label=f"{task_name}")
-                color_idx += 1
+    # Generate plot for each evaluation step
+    for step_idx, eval_step in enumerate(eval_steps):
+        plt.figure(figsize=(12, 8))
+        color_idx = 0
+        
+        for task_name, metrics in eval_metrics.items():
+            for metric_name, values in metrics.items():
+                if "Transformer | True" in metric_name and values and step_idx < len(values):
+                    # Get MSE by position for this step
+                    mse_by_position = values[step_idx]  # List of MSE values by position
+                    n_points = len(mse_by_position)
+                    positions = list(range(1, n_points + 1))  # Context length positions
+                    
+                    plt.plot(positions, mse_by_position,
+                            color=colors[color_idx % len(colors)],
+                            linewidth=2,
+                            marker='o',
+                            markersize=6,
+                            label=f"{task_name}")
+                    color_idx += 1
+        
+        plt.xlabel("Context Length (Position)")
+        plt.ylabel("MSE (Transformer vs True)")
+        plt.title(f"ICL Performance at Step {eval_step} - {run_id}")
+        plt.grid(True, alpha=0.3)
+        plt.yscale('log')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        
+        # Save plot for this step
+        output_path = icl_dir / f"icl_step_{eval_step:04d}.png"
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()  # Close to save memory
     
-    plt.xlabel("Context Length (Position)")
-    plt.ylabel("MSE (Transformer vs True)")
-    plt.title(f"MSE vs Context Length at Final Iteration - {run_id}")
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    plt.tight_layout()
-    
-    # Save plot
-    output_path = Path("outputs") / run_id / "mse_vs_context_length.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Context length plot saved to: {output_path}")
-    
-    plt.show()
+    print(f"ICL plots for {len(eval_steps)} steps saved to: {icl_dir}")
 
 
 def main():
@@ -219,7 +232,7 @@ Examples:
     log = load_log(run_id)
     print_summary(log, run_id)
     plot_training_loss(log, run_id)
-    plot_mse_vs_context_length(log, run_id)
+    plot_icl_for_all_steps(log, run_id)
         
     return 0
 
