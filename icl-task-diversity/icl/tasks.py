@@ -3,7 +3,7 @@ from typing import Any, Callable, List
 
 import jax
 import jax.numpy as jnp
-from jax import Array
+from jax import Array, tree_util
 
 from icl.models import Model, get_model
 
@@ -115,6 +115,7 @@ class NoisyLinearRegression:
         data = jax.random.normal(key, shape, self.dtype) * self.data_scale
         return data
 
+    @jax.jit
     def sample_data(self, step: int) -> Array:
         key = jax.random.fold_in(self.data_key, step)
         if self.n_data > 0:
@@ -125,6 +126,7 @@ class NoisyLinearRegression:
             data = jax.random.normal(key, shape, self.dtype) * self.data_scale + self.task_center
         return data
 
+    @jax.jit
     def sample_tasks(self, step: int) -> Array:
         key = jax.random.fold_in(self.task_key, step)
         if self.n_tasks > 0:
@@ -137,12 +139,14 @@ class NoisyLinearRegression:
                 tasks = jnp.clip(tasks, -self.clip, self.clip)
         return tasks
 
+    @jax.jit
     def evaluate(self, data: Array, tasks: Array, step: int) -> Array:
         targets = (data @ tasks)[:, :, 0]
         key = jax.random.fold_in(self.noise_key, step)
         noise = jax.random.normal(key, targets.shape, self.dtype) * self.noise_scale
         return targets + noise
 
+    @jax.jit
     def generate_attention_mask(self) -> Array:
         """Generate causal attention mask for the sequence with right padding.
         
@@ -164,6 +168,7 @@ class NoisyLinearRegression:
         mask = mask.at[:effective_seq_len, :effective_seq_len].set(valid_mask)
         return mask
 
+    @jax.jit
     def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
         data, tasks = self.sample_data(step), self.sample_tasks(step)
         targets = self.evaluate(data, tasks, step)
@@ -171,6 +176,7 @@ class NoisyLinearRegression:
         return data, tasks, targets, attention_mask
 
     @staticmethod
+    @jax.jit
     def evaluate_oracle(data: Array, tasks: Array) -> Array:
         targets = (data @ tasks)[:, :, 0]
         return targets
@@ -223,6 +229,66 @@ class NoisyLinearRegression:
         models = [get_model(name="ridge", lam=self.noise_scale**2 / self.task_scale**2, dtype=self.dtype)]
         return models
 
+    def _tree_flatten(self):
+        # Dynamic values (arrays, keys, and values that can change)
+        children = (
+            self.data_key,
+            self.task_key, 
+            self.noise_key,
+            self.task_pool,
+            self.data_pool,
+            self.data_scale,
+            self.task_scale,
+            self.noise_scale,
+            self.task_center,
+            self.clip,
+        )
+        
+        # Static values (configuration that doesn't change during execution)
+        aux_data = {
+            'n_tasks': self.n_tasks,
+            'n_data': self.n_data,
+            'n_dims': self.n_dims,
+            'n_points': self.n_points,
+            'batch_size': self.batch_size,
+            'data_seed': self.data_seed,
+            'task_seed': self.task_seed,
+            'noise_seed': self.noise_seed,
+            'dtype': self.dtype,
+            'n_max_points': self.n_max_points,
+            'name': self.name,
+        }
+        
+        return (children, aux_data)
+
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+        (data_key, task_key, noise_key, task_pool, data_pool,
+         data_scale, task_scale, noise_scale, task_center, clip) = children
+        
+        # Create object with aux_data parameters and placeholder scale values
+        obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
+                 task_center=0.0, clip=None, **aux_data)
+        
+        # Set the dynamic values
+        obj.data_key = data_key
+        obj.task_key = task_key
+        obj.noise_key = noise_key
+        obj.task_pool = task_pool
+        obj.data_pool = data_pool
+        obj.data_scale = data_scale
+        obj.task_scale = task_scale
+        obj.noise_scale = noise_scale
+        obj.task_center = task_center
+        obj.clip = clip
+        
+        return obj
+
+
+# Register NoisyLinearRegression as a PyTree
+tree_util.register_pytree_node(NoisyLinearRegression,
+                               NoisyLinearRegression._tree_flatten,
+                               NoisyLinearRegression._tree_unflatten)
 
 ########################################################################################################################
 # Get Task                                                                                                             #

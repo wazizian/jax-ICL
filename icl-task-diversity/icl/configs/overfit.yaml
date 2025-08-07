@@ -39,8 +39,12 @@ eval:
   task_seed: 105
   noise_seed: 106
   every: 5
-  eval_n_points:
-    - 4
+  eval_n_points: 4
+  task_centers:
+    - 2.0
+    - 4.0
+    - 6.0
+    - 8.0
 
 # Hydra settings
 hydra:

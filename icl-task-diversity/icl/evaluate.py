@@ -15,6 +15,7 @@ from icl.tasks import Sampler, Task
 Preds = dict[str, dict[str, Array]]
 
 
+@jax.jit
 def mse(a: Array, b: Array) -> Array:
     return jnp.square(a - b).mean(0)
 
