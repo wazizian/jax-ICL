@@ -22,8 +22,8 @@ def mse(a: Array, b: Array) -> Array:
 
 @jax.jit  
 def relative_error(a: Array, b: Array) -> Array:
-    """Compute relative error: |a - b|^2 / |b|^2 averaged over samples (axis 0)."""
-    return (jnp.square(a - b) / (jnp.square(b) + 1e-8)).mean(0)  # Small epsilon to avoid division by zero
+    """Compute relative error: |a - b|^2 / (|b|^2 + 1) averaged over samples (axis 0)."""
+    return (jnp.square(a - b) / (jnp.square(b) + 1)).mean(0)  # Small epsilon to avoid division by zero
 
 
 def get_oracle_step(task: Task) -> Callable[[Array, Array], Array]:

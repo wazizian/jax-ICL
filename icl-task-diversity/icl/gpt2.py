@@ -80,9 +80,11 @@ class GPT2Block(nn.Module):
     config: GPT2Config
 
     def setup(self):
-        self.ln_1 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
+        if self.config.use_ln:
+            self.ln_1 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
         self.attn = GPT2SelfAttention(self.config)
-        self.ln_2 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
+        if self.config.use_ln:
+            self.ln_2 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
         self.mlp = GPT2MLP(self.config)
 
     def __call__(self, x: Array, attention_mask: Array, training: bool = False) -> Array:
@@ -102,7 +104,8 @@ class GPT2Model(nn.Module):
         self.wpe = nn.Embed(self.config.block_size, self.config.n_embd, self.config.dtype, embedding_init=init_fn)
         self.drop = nn.Dropout(self.config.dropout)
         self.hs = [GPT2Block(self.config) for _ in range(self.config.n_layer)]
-        self.ln_f = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
+        if self.config.use_ln:
+            self.ln_f = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
 
     def __call__(self, input_embds: Array, attention_mask: Array, training: bool = False) -> Array:
         pos = jnp.expand_dims(jnp.arange(self.config.block_size), axis=0)  # (1, T)
