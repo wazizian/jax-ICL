@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import time
 
 import jax
 import jax.numpy as jnp
@@ -64,10 +65,11 @@ def train_step(state: TrainState, data: Array, targets: Array, attention_mask: A
         return loss, preds
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    _, grads = grad_fn(state.params)
+    (loss, _), grads = grad_fn(state.params)
     grads = jax.lax.pmean(grads, axis_name="device")
+    loss = jax.lax.pmean(loss, axis_name="device")
     state = state.apply_gradients(grads=grads)
-    return state
+    return loss, state
 
 
 def eval_step(state: TrainState, data: Array, targets: Array, attention_mask: Array) -> Array:
@@ -148,31 +150,26 @@ def train(config: ConfigDict) -> None:
     logging.info("Start Train Loop")
     train_losses = []
     epoch_size = max(1, config.eval.every)
+    last_epoch_time = time.time()
     
     for i in range(1, config.training.total_steps + 1):
         # Train step
         data, _, targets, attention_mask = j_sample_train_batch(i)
         
-        # Compute loss for logging
-        def compute_loss(state, data, targets, attention_mask):
-            preds = state.apply_fn({"params": state.params}, data, targets, attention_mask, training=False)
-            loss = jnp.square(preds - targets).mean()
-            return loss
-        
-        p_compute_loss = jax.pmap(compute_loss, axis_name="device")
-        loss = p_compute_loss(state, data, targets, attention_mask).mean()
+        loss, state = p_train_step(state, data, targets, attention_mask, dropout_rngs)
         train_losses.append(loss.item())
-        
-        state = p_train_step(state, data, targets, attention_mask, dropout_rngs)
 
         # Evaluate
         if i % config.eval.every == 0 or i == config.training.total_steps:
+            # Log time taken for the last epoch 
+            t = time.time() - last_epoch_time
+
             # Calculate and print average training loss over last epoch
             recent_losses = train_losses[-epoch_size:]
             avg_train_loss = sum(recent_losses) / len(recent_losses)
             
             # Log step and lr
-            logging.info(f"Step: {i} | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {float(lr(i)):.6f}")
+            logging.info(f"Step: {i} [{t:.2f}s] | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {float(lr(i)):.6f}")
             log["train/step"].append(i)
             log["train/lr"].append(float(lr(i)))
             log["train/loss"].append(avg_train_loss)
@@ -195,6 +192,9 @@ def train(config: ConfigDict) -> None:
 
             # Checkpoint - save to Hydra output directory
             ckpt_mngr.save(i, args=ocp.args.StandardSave(jax_utils.unreplicate(state)))
+
+            # Rest last epoch time
+            last_epoch_time = time.time()
 
     # Save logs to Hydra output directory
     with open(exp_dir / "log.json", "w") as f:

@@ -38,7 +38,7 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 5
+  every: 25
   eval_n_points: 4
   task_centers:
     - 2.0
