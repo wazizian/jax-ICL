@@ -24,9 +24,9 @@ from icl.tasks import Sampler, Task, get_task, get_task_name
 
 def initialize(model: Transformer, config: ConfigDict) -> tuple[FrozenDict, Array]:
     params_rng, dropout_rng = jr.split(jr.PRNGKey(config.model.seed))
-    dummy_data = jnp.ones((config.task.batch_size, config.task.n_points, config.task.n_dims), dtype=model.dtype)
-    dummy_targets = jnp.ones((config.task.batch_size, config.task.n_points), dtype=model.dtype)
-    dummy_mask = jnp.ones((config.task.batch_size, 2 * config.task.n_points, 2 * config.task.n_points)).astype(bool)
+    dummy_data = jnp.ones((config.task.batch_size, config.model.n_points, config.task.n_dims), dtype=model.dtype)
+    dummy_targets = jnp.ones((config.task.batch_size, config.model.n_points), dtype=model.dtype)
+    dummy_mask = jnp.ones((config.task.batch_size, 2 * config.model.n_points, 2 * config.model.n_points)).astype(bool)
     variables = jax.jit(model.init)(params_rng, dummy_data, dummy_targets, dummy_mask)
     return variables["params"], dropout_rng
 
@@ -97,12 +97,10 @@ def train(config: ConfigDict) -> None:
     
     logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\nCONFIG:\n{config}")
     
-    # Experiment completed?
-    log_file = exp_dir / "log.json"
-    if log_file.exists():
-        logging.info(f"{exp_name} already completed")
-        return None
-    
+    # Validate config 
+    assert config.model.n_points == config.task.n_points, "Model n_points must match Task n_points"
+    assert config.eval.eval_n_points <= config.task.n_points, "Eval n_points must be less than or equal to Task n_points"
+
     # Config is already saved by Hydra, but save our version too  
     config_file = exp_dir / "config.json"
     with open(config_file, "w") as f:
@@ -111,7 +109,7 @@ def train(config: ConfigDict) -> None:
 
     # Model, optimizer and lr schedule
     model = get_model(**config.model, dtype=jnp.dtype(config.dtype))
-    logging.info(u.tabulate_model(model, config.task.n_dims, config.task.n_points, config.task.batch_size))
+    logging.info(u.tabulate_model(model, config.task.n_dims, config.model.n_points, config.task.batch_size))
     params, dropout_rng = initialize(model, config)
     tx, lr = get_optimizer_and_lr_schedule(**config.training, params=params)
     logging.info("Initialized Model, Optimizer and LR Schedule")

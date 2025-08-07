@@ -19,7 +19,7 @@ task:
 
 model:
   name: transformer
-  n_points: 16
+  n_points: 128
   n_layer: 4
   n_embd: 32
   n_head: 2

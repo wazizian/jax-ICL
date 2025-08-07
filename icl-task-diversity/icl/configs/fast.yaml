@@ -7,7 +7,7 @@ task:
   n_tasks: 2
   n_data: 0
   n_dims: 2
-  n_points: 4
+  n_points: 5
   batch_size: 8
   data_seed: 101
   task_seed: 102
@@ -19,7 +19,7 @@ task:
 
 model:
   name: transformer
-  n_points: 4
+  n_points: 5
   n_layer: 2
   n_embd: 2
   n_head: 2
