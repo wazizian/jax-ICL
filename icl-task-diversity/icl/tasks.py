@@ -16,17 +16,7 @@ Sampler = Callable[[int], tuple[Array, Array, Array, Array]]
 
 
 def get_task_name(task: "Task") -> str:
-    """
-    Get the task type name for evaluation logging.
-    
-    Returns:
-        "Pretrain" for tasks with fresh random task vectors (n_tasks=0)  
-        "Latent" for tasks with fixed task pool (n_tasks>0)
-    """
-    main_name = "Test Tasks" if task.name.endswith("(0)") else "Train tasks"
-    context_length = task.n_points
-    return f"{main_name} ({context_length})"
-
+    return task.name 
 
 ########################################################################################################################
 # Noisy Linear Regression                                                                                              #
@@ -89,19 +79,20 @@ class NoisyLinearRegression:
     task_scale: float
     noise_scale: float
     dtype: Any
+    task_center: float | None = None
     n_max_points: int | None = None  # Optional, used for padding in some models
+    clip: float | None = None  # Optional, clip task vectors to [-clip, clip]^d
+    name: str | None = None  # Optional, can be set to override default name
 
     def __post_init__(self):
         self.data_key = jax.random.PRNGKey(self.data_seed)
         self.task_key = jax.random.PRNGKey(self.task_seed)
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
+        self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
+        self.task_center = 0.0 if self.task_center is None else self.task_center
         self.task_pool = self.generate_task_pool() if self.n_tasks > 0 else None
         self.data_pool = self.generate_data_pool() if self.n_data > 0 else None
-        self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
-
-    @property
-    def name(self) -> str:
-        return f"NoisyLinReg({self.n_tasks})"
+        self.name = f"NoisyLinReg({self.n_tasks})" if self.name is None else self.name
 
     @classmethod
     def from_task_pool(cls, task_pool: Array, **kwargs) -> "NoisyLinearRegression":
@@ -113,7 +104,9 @@ class NoisyLinearRegression:
     def generate_task_pool(self) -> Array:
         key = jax.random.fold_in(self.task_key, 0)
         shape = self.n_tasks, self.n_dims, 1
-        tasks = jax.random.normal(key, shape, self.dtype) * self.task_scale
+        tasks = jax.random.normal(key, shape, self.dtype) * self.task_scale + self.task_center
+        if self.clip is not None:
+            tasks = jnp.clip(tasks, -self.clip, self.clip)
         return tasks
 
     def generate_data_pool(self) -> Array:
@@ -129,7 +122,7 @@ class NoisyLinearRegression:
             data = self.data_pool[idxs]
         else:
             shape = self.batch_size, self.n_points, self.n_dims
-            data = jax.random.normal(key, shape, self.dtype) * self.data_scale
+            data = jax.random.normal(key, shape, self.dtype) * self.data_scale + self.task_center
         return data
 
     def sample_tasks(self, step: int) -> Array:
@@ -140,6 +133,8 @@ class NoisyLinearRegression:
         else:
             shape = self.batch_size, self.n_dims, 1
             tasks = jax.random.normal(key, shape, self.dtype) * self.task_scale
+            if self.clip is not None:
+                tasks = jnp.clip(tasks, -self.clip, self.clip)
         return tasks
 
     def evaluate(self, data: Array, tasks: Array, step: int) -> Array:
@@ -181,7 +176,7 @@ class NoisyLinearRegression:
         return targets
 
     def get_default_eval_tasks(
-            self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], **kwargs
+            self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], task_centers: List[float] | None = None, **kwargs
     ) -> list["NoisyLinearRegression"]:
         del kwargs
         assert task_seed != self.task_seed
@@ -196,13 +191,32 @@ class NoisyLinearRegression:
         config["n_data"] = 0
         config["n_max_points"] = self.n_max_points
         eval_tasks = []
-        for n_points in eval_n_points:
-            assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
-            config["n_points"] = n_points
-            eval_tasks.append(self.__class__(**config))
+        n_points = eval_n_points
+        assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
+        config["n_points"] = n_points
+        # Test  with fresh tasks from training distribution
+        name = f"Test tasks"
+        config["name"] = name
+        eval_tasks.append(self.__class__(**config))
+
+        # Test with same tasks as training distribution
         if self.n_tasks > 0:
+            name = f"Train tasks"
             config["n_tasks"] = self.n_tasks
+            config["name"] = name
             eval_tasks.append(NoisyLinearRegression.from_task_pool(**config, task_pool=self.task_pool.copy()))
+        
+        config["n_tasks"] = 0  # Reset for fresh tasks
+
+        # Test with fixed task centers
+        if task_centers is not None:
+            for task_center in task_centers:
+                config["task_center"] = task_center
+                # config["task_scale"] = 0.
+                config["clip"] = None
+                name = f"Fixed task {task_center}"
+                config["name"] = name
+                eval_tasks.append(self.__class__(**config))
         return eval_tasks
 
     def get_default_eval_models(self) -> list[Model]:

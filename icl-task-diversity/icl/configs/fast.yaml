@@ -5,7 +5,7 @@ log_level: INFO
 task:
   name: noisy_linear_regression
   n_tasks: 2
-  n_data: 2
+  n_data: 0
   n_dims: 2
   n_points: 4
   batch_size: 8
@@ -15,6 +15,7 @@ task:
   data_scale: 1.0
   task_scale: 1.0
   noise_scale: 0.5
+  clip: 1.0
 
 model:
   name: transformer
@@ -38,9 +39,12 @@ eval:
   task_seed: 105
   noise_seed: 106
   every: 1
-  eval_n_points:
-    - 2
-    - 4
+  eval_n_points: 4
+  task_centers:
+    - 2.0
+    - 4.0
+    - 6.0
+    - 8.0
 
 # Hydra settings
 hydra:
