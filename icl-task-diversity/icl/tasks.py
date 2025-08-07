@@ -83,6 +83,7 @@ class NoisyLinearRegression:
     n_max_points: int | None = None  # Optional, used for padding in some models
     clip: float | None = None  # Optional, clip task vectors to [-clip, clip]^d
     name: str | None = None  # Optional, can be set to override default name
+    eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
 
     def __post_init__(self):
         self.data_key = jax.random.PRNGKey(self.data_seed)
@@ -226,8 +227,11 @@ class NoisyLinearRegression:
         return eval_tasks
 
     def get_default_eval_models(self) -> list[Model]:
-        models = [get_model(name="ridge", lam=self.noise_scale**2 / self.task_scale**2, dtype=self.dtype)]
-        return models
+        if self.eval_ridge:
+            models = [get_model(name="ridge", lam=self.noise_scale**2 / self.task_scale**2, dtype=self.dtype)]
+            return models
+        else:
+            return []
 
     def _tree_flatten(self):
         # Dynamic values (arrays, keys, and values that can change)
@@ -257,6 +261,7 @@ class NoisyLinearRegression:
             'dtype': self.dtype,
             'n_max_points': self.n_max_points,
             'name': self.name,
+            'eval_ridge': self.eval_ridge,
         }
         
         return (children, aux_data)

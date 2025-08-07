@@ -40,6 +40,7 @@ eval:
   noise_seed: 106
   every: 1
   eval_n_points: 4
+  eval_ridge: true
   task_centers:
     - 2.0
     - 4.0

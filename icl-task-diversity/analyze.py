@@ -139,6 +139,54 @@ def print_summary(log: dict, run_id: str):
                     print(f"  {metric_name}: {final_mse:.6f}")
 
 
+def plot_mse_vs_context_length(log: dict, run_id: str):
+    """Plot MSE of transformer vs true as a function of context length at final iteration."""
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/"):
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+    
+    plt.figure(figsize=(12, 8))
+    
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+    color_idx = 0
+    
+    for task_name, metrics in eval_metrics.items():
+        for metric_name, values in metrics.items():
+            if "Transformer | True" in metric_name and values:
+                # Get the final evaluation (last iteration)
+                final_mse_by_position = values[-1]  # List of MSE values by position
+                n_points = len(final_mse_by_position)
+                positions = list(range(1, n_points + 1))  # Context length positions
+                
+                plt.plot(positions, final_mse_by_position,
+                        color=colors[color_idx % len(colors)],
+                        linewidth=2,
+                        marker='o',
+                        markersize=6,
+                        label=f"{task_name}")
+                color_idx += 1
+    
+    plt.xlabel("Context Length (Position)")
+    plt.ylabel("MSE (Transformer vs True)")
+    plt.title(f"MSE vs Context Length at Final Iteration - {run_id}")
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    
+    # Save plot
+    output_path = Path("outputs") / run_id / "mse_vs_context_length.png"
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Context length plot saved to: {output_path}")
+    
+    plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze training logs and plot metrics",
@@ -171,6 +219,7 @@ Examples:
         log = load_log(run_id)
         print_summary(log, run_id)
         plot_training_loss(log, run_id)
+        plot_mse_vs_context_length(log, run_id)
         
     except FileNotFoundError as e:
         print(f"Error: {e}")
