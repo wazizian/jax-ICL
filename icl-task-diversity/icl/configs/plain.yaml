@@ -15,7 +15,7 @@ task:
   data_scale: 1.0
   task_scale: 1.0
   noise_scale: 0.5
-  clip: 2.0
+  clip: 10.0
   use_weights: false
 
 model:
