@@ -20,6 +20,12 @@ def mse(a: Array, b: Array) -> Array:
     return jnp.square(a - b).mean(0)
 
 
+@jax.jit  
+def relative_error(a: Array, b: Array) -> Array:
+    """Compute relative error: |a - b| / |b| averaged over samples (axis 0)."""
+    return (jnp.abs(a - b) / (jnp.abs(b) + 1e-8)).mean(0)  # Small epsilon to avoid division by zero
+
+
 def get_oracle_step(task: Task) -> Callable[[Array, Array], Array]:
     def step(xs: Array, ws: Array) -> Array:
         preds = task.evaluate_oracle(xs, ws)

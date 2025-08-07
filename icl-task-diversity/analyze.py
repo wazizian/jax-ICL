@@ -51,7 +51,8 @@ def plot_training_loss(log: dict, run_id: str):
     lr_values = log["train/lr"]
     train_losses = log.get("train/loss", [])
     
-    fig, axes = plt.subplots(3, 1, figsize=(18, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+    axes = axes.flatten()
     
     # Plot training loss
     if train_losses:
@@ -81,26 +82,44 @@ def plot_training_loss(log: dict, run_id: str):
                 eval_metrics[task_name][metric_name] = metric_values
     
     # Plot MSE for each task and baseline
-    colors = ['red', 'blue', 'green', 'orange', 'purple']
-    color_idx = 0
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+    color_idx_mse = 0
+    color_idx_rel = 0
     
     for task_name, metrics in eval_metrics.items():
         for metric_name, values in metrics.items():
-            if "Transformer |" in metric_name:
-                # Convert list of lists to mean values
+            if "Transformer |" in metric_name and "(RelErr)" not in metric_name:
+                # MSE metrics (exclude relative error)
                 mean_values = [np.mean(v) for v in values]
                 axes[2].plot(eval_steps, mean_values, 
-                        color=colors[color_idx % len(colors)], 
+                        color=colors[color_idx_mse % len(colors)], 
                         linewidth=2,
                         label=f"{task_name}: {metric_name}")
-                color_idx += 1
+                color_idx_mse += 1
+            elif "Transformer |" in metric_name and "(RelErr)" in metric_name:
+                # Relative error metrics
+                mean_values = [np.mean(v) for v in values]
+                axes[3].plot(eval_steps, mean_values, 
+                        color=colors[color_idx_rel % len(colors)], 
+                        linewidth=2,
+                        label=f"{task_name}: {metric_name}")
+                color_idx_rel += 1
     
+    # Configure MSE plot (axes[2])
     axes[2].set_xlabel("Training Step")
     axes[2].set_ylabel("Mean Squared Error")
-    axes[2].set_title(f"Evaluation Metrics - {run_id}")
+    axes[2].set_title(f"MSE Evaluation Metrics - {run_id}")
     axes[2].grid(True, alpha=0.3)
-    # axes[2].set_yscale('log')
+    axes[2].set_yscale('log')
     axes[2].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Configure Relative Error plot (axes[3])
+    axes[3].set_xlabel("Training Step")
+    axes[3].set_ylabel("Relative Error")
+    axes[3].set_title(f"Relative Error Evaluation Metrics - {run_id}")
+    axes[3].grid(True, alpha=0.3)
+    axes[3].set_yscale('log')
+    axes[3].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
     plt.tight_layout()
     
@@ -141,7 +160,7 @@ def print_summary(log: dict, run_id: str):
 
 
 def plot_icl_for_all_steps(log: dict, run_id: str):
-    """Plot MSE vs context length for every evaluation step."""
+    """Plot MSE and Relative Error vs context length for every evaluation step."""
     eval_steps = log.get("eval/step", [])
     if not eval_steps:
         print("No evaluation steps found in log")
@@ -157,21 +176,25 @@ def plot_icl_for_all_steps(log: dict, run_id: str):
             for metric_name, metric_values in value.items():
                 eval_metrics[task_name][metric_name] = metric_values
     
-    # Create output directory for ICL plots
-    icl_dir = Path("outputs") / run_id / "icl_plots"
-    icl_dir.mkdir(exist_ok=True)
+    # Create output directories for ICL plots
+    icl_mse_dir = Path("outputs") / run_id / "icl_plots_mse"
+    icl_rel_err_dir = Path("outputs") / run_id / "icl_plots_rel_err"
+    icl_mse_dir.mkdir(exist_ok=True)
+    icl_rel_err_dir.mkdir(exist_ok=True)
     
     # Colors for different tasks
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
     
-    # Generate plot for each evaluation step
+    # Generate plots for each evaluation step
     for step_idx, eval_step in enumerate(eval_steps):
+        
+        # MSE Plot
         plt.figure(figsize=(12, 8))
         color_idx = 0
         
         for task_name, metrics in eval_metrics.items():
             for metric_name, values in metrics.items():
-                if "Transformer | True" in metric_name and values and step_idx < len(values):
+                if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
                     # Get MSE by position for this step
                     mse_by_position = values[step_idx]  # List of MSE values by position
                     n_points = len(mse_by_position)
@@ -187,18 +210,52 @@ def plot_icl_for_all_steps(log: dict, run_id: str):
         
         plt.xlabel("Context Length (Position)")
         plt.ylabel("MSE (Transformer vs True)")
-        plt.title(f"ICL Performance at Step {eval_step} - {run_id}")
+        plt.title(f"ICL MSE Performance at Step {eval_step} - {run_id}")
         plt.grid(True, alpha=0.3)
         plt.yscale('log')
         plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         plt.tight_layout()
         
-        # Save plot for this step
-        output_path = icl_dir / f"icl_step_{eval_step:04d}.png"
+        # Save MSE plot for this step
+        output_path = icl_mse_dir / f"icl_step_{eval_step:04d}.png"
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()  # Close to save memory
+        
+        # Relative Error Plot
+        plt.figure(figsize=(12, 8))
+        color_idx = 0
+        
+        for task_name, metrics in eval_metrics.items():
+            for metric_name, values in metrics.items():
+                if "Transformer | True (RelErr)" in metric_name and values and step_idx < len(values):
+                    # Get Relative Error by position for this step
+                    rel_err_by_position = values[step_idx]  # List of RelErr values by position
+                    n_points = len(rel_err_by_position)
+                    positions = list(range(1, n_points + 1))  # Context length positions
+                    
+                    plt.plot(positions, rel_err_by_position,
+                            color=colors[color_idx % len(colors)],
+                            linewidth=2,
+                            marker='o',
+                            markersize=6,
+                            label=f"{task_name}")
+                    color_idx += 1
+        
+        plt.xlabel("Context Length (Position)")
+        plt.ylabel("Relative Error (Transformer vs True)")
+        plt.title(f"ICL Relative Error Performance at Step {eval_step} - {run_id}")
+        plt.grid(True, alpha=0.3)
+        plt.yscale('log')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        
+        # Save Relative Error plot for this step
+        output_path = icl_rel_err_dir / f"icl_step_{eval_step:04d}.png"
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()  # Close to save memory
     
-    print(f"ICL plots for {len(eval_steps)} steps saved to: {icl_dir}")
+    print(f"ICL MSE plots for {len(eval_steps)} steps saved to: {icl_mse_dir}")
+    print(f"ICL Relative Error plots for {len(eval_steps)} steps saved to: {icl_rel_err_dir}")
 
 
 def main():

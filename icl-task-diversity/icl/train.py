@@ -16,7 +16,7 @@ from ml_collections import ConfigDict
 from hydra.core.hydra_config import HydraConfig
 
 import icl.utils as u
-from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse
+from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_error
 from icl.models import Transformer, get_model
 from icl.optim import get_optimizer_and_lr_schedule
 from icl.tasks import Sampler, Task, get_task, get_task_name
@@ -57,7 +57,7 @@ def get_sharded_batch_sampler(task: Task) -> Sampler:
     return sample_batch
 
 
-def train_step(state: TrainState, data: Array, weights: Array, targets: Array, attention_mask: Array, dropout_rng: Array) -> TrainState:
+def train_step(state: TrainState, data: Array, weights: Array, targets: Array, attention_mask: Array, dropout_rng: Array) -> tuple[Array, TrainState]:
     dropout_rng = jr.fold_in(dropout_rng, state.step + 1)
 
     def loss_fn(params):
@@ -88,9 +88,12 @@ def _init_log(bsln_preds: Preds, n_dims: int) -> dict:
         log[f"eval/{_task_name}"] = {}
         for _bsln_name, _bsln_preds in _task_preds.items():
             log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"] = []
+            log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"] = []
             if _bsln_name != "True":
                 _errs = mse(_bsln_preds, _task_preds["True"]) / n_dims
+                _rel_errs = relative_error(_bsln_preds, _task_preds["True"])
                 log[f"eval/{_task_name}"][f"{_bsln_name} | True"] = _errs.tolist()
+                log[f"eval/{_task_name}"][f"{_bsln_name} | True (RelErr)"] = _rel_errs.tolist()
     return log
 
 
@@ -188,9 +191,12 @@ def train(config: ConfigDict) -> None:
                 logging.info(f"Task: {_task_name}")
                 for _bsln_name, _bsln_preds in _task_preds.items():
                     _errs = mse(eval_preds[_task_name]["Transformer"], _bsln_preds) / config.task.n_dims
+                    _rel_errs = relative_error(eval_preds[_task_name]["Transformer"], _bsln_preds)
                     avg_err = _errs.mean().item()
+                    avg_rel_err = _rel_errs.mean().item()
                     log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
-                    logging.info(f"  Transformer vs {_bsln_name}: {avg_err:.6f}")
+                    log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"].append(_rel_errs.tolist())
+                    logging.info(f"  Transformer vs {_bsln_name}: MSE={avg_err:.6f}, RelErr={avg_rel_err:.6f}")
             logging.info("=========================")
 
             # Checkpoint - save to Hydra output directory
