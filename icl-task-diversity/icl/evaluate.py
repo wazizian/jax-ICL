@@ -52,7 +52,7 @@ def get_bsln_preds(train_task: Task, j_batch_samplers: dict[str, Sampler], n_sam
             preds[task_name][model_name] = []
         # Accumulate preds...
         for i in range(1, n_samples // batch_size + 1):
-            xs, ws, ys, attention_mask = j_sample_batch(i)
+            xs, ws, weights, ys, attention_mask = j_sample_batch(i)
             _, _, n_points = ys.shape
             preds[task_name]["True"].append(p_oracle(xs, ws).reshape(batch_size, n_points))  # ...for oracle
             for model_name, p_model in p_bsln_models.items():  # ...for baseline models
@@ -76,7 +76,7 @@ def get_model_preds(
     for task_name, j_sample_batch in j_batch_samplers.items():
         preds[task_name] = {"Transformer": []}
         for i in range(1, n_samples // batch_size + 1):
-            xs, _, ys, attention_mask = j_sample_batch(i)
+            xs, _, weights, ys, attention_mask = j_sample_batch(i)
             _, _, n_points = ys.shape
             preds[task_name]["Transformer"].append(p_eval_step(state, xs, ys, attention_mask).reshape(batch_size, n_points))
         preds[task_name]["Transformer"] = jnp.concatenate(preds[task_name]["Transformer"])

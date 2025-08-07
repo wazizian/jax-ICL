@@ -15,7 +15,8 @@ task:
   data_scale: 1.0
   task_scale: 1.0
   noise_scale: 0.5
-  clip: 1.0
+  clip: 2.0
+  use_weights: false
 
 model:
   name: transformer
@@ -29,8 +30,8 @@ training:
   optimizer: adam
   lr: 1.0e-3
   schedule: warmup_cosine_decay
-  warmup_steps: 2_000
-  total_steps: 20_000
+  warmup_steps: 5_000
+  total_steps: 40_000
 
 eval:
   n_samples: 2048

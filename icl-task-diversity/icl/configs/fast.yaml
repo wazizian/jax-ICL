@@ -15,7 +15,8 @@ task:
   data_scale: 1.0
   task_scale: 1.0
   noise_scale: 0.5
-  clip: 1.0
+  clip: 2.0
+  use_weights: true
 
 model:
   name: transformer

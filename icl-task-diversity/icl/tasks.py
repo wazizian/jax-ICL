@@ -13,50 +13,48 @@ from icl.models import Model, get_model
 ########################################################################################################################
 
 
-Sampler = Callable[[int], tuple[Array, Array, Array, Array]]
+Sampler = Callable[[int], tuple[Array, Array, Array, Array, Array]]
 
 
 def get_task_name(task: "Task") -> str:
     return task.name 
 
-@partial(jax.jit, static_argnames=("shape", "dtype"))
-def sample_conditioned_multivariate_gaussian(
-        key: jax.random.PRNGKey,
-        loc: Array,
-        scale: Array,
-        clip: float,
-        shape: tuple[int, ...],
-        dtype: Any = jnp.float32
-        ) -> Array:
-    def cond_fun(val):
-        _, x = val
-        return jnp.any(jnp.abs(x) > clip)
-
-    def body_fun(val):
-        key, x = val
-        key, subkey = jax.random.split(key)
-        new_sample = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
-        new_x = jax.lax.select(jnp.abs(x) > clip, new_sample, x)
-        return key, new_x
-
-    key, subkey = jax.random.split(key)
-    init_x = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
-    init_val = (key, init_x)
-    _, final_x = jax.lax.while_loop(cond_fun, body_fun, init_val)
-    return final_x 
-
 def sample_multivariate_gaussian(
         key: jax.random.PRNGKey,
         loc: Array,
         scale: Array,
-        clip: float,
+        clip: float | None,
         shape: tuple[int, ...],
         dtype: Any = jnp.float32
         ) -> Array:
     if clip is not None:
-        return sample_conditioned_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
+        return jax.random.truncated_normal(
+            key,
+            lower=(-clip - loc) / scale,
+            upper=(clip - loc) / scale,
+            shape=shape,
+            dtype=dtype
+            ) * scale + loc
     else:
         return jax.random.normal(key, shape=shape, dtype=dtype) * scale + loc
+
+#@partial(jax.jit, static_argnames=("clip",))
+def task_log_weights(
+        tasks: Array,
+        loc: float,
+        scale: float,
+        clip: float | None,
+        use_weights: bool = False,
+        reduce_axis: int = -1
+        ) -> Array:
+    if not use_weights:
+        return jnp.zeros_like(tasks).sum(axis=reduce_axis)
+    if clip is None:
+        log_weights = jax.scipy.stats.norm.logpdf(tasks, loc=loc, scale=scale)
+    else:
+        log_weights = jax.scipy.stats.truncnorm.logpdf(tasks, -clip, clip, loc=loc, scale=scale)
+    return - jnp.sum(log_weights, axis=reduce_axis)  # IMPORTANT: minus
+
 
 ########################################################################################################################
 # Noisy Linear Regression                                                                                              #
@@ -124,6 +122,7 @@ class NoisyLinearRegression:
     clip: float | None = None  # Optional, clip task vectors to [-clip, clip]^d
     name: str | None = None  # Optional, can be set to override default name
     eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
+    use_weights: bool = False  # Optional, whether to use task importance weights
 
     def __post_init__(self):
         self.data_key = jax.random.PRNGKey(self.data_seed)
@@ -131,22 +130,27 @@ class NoisyLinearRegression:
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
         self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
         self.task_center = 0.0 if self.task_center is None else self.task_center
-        self.task_pool = self.generate_task_pool() if self.n_tasks > 0 else None
+        task_pool, weights = self.generate_task_pool() if self.n_tasks > 0 else (None, None)
+        self.task_pool = task_pool
+        self.weights = weights
         self.data_pool = self.generate_data_pool() if self.n_data > 0 else None
         self.name = f"NoisyLinReg({self.n_tasks})" if self.name is None else self.name
 
     @classmethod
-    def from_task_pool(cls, task_pool: Array, **kwargs) -> "NoisyLinearRegression":
+    def from_task_pool(cls, task_pool: Array, weights: Array, **kwargs) -> "NoisyLinearRegression":
         assert kwargs["n_tasks"] == task_pool.shape[0]
         task = cls(**kwargs)
         task.task_pool = task_pool
+        task.weights = weights
         return task
 
     def generate_task_pool(self) -> Array:
         key = jax.random.fold_in(self.task_key, 0)
         shape = self.n_tasks, self.n_dims, 1
         tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
-        return tasks
+        log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
+        weights = jax.nn.softmax(log_weights, axis=0)
+        return tasks, weights
 
     def generate_data_pool(self) -> Array:
         key = jax.random.fold_in(self.data_key, 0)
@@ -171,11 +175,12 @@ class NoisyLinearRegression:
         if self.n_tasks > 0:
             idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
             tasks = self.task_pool[idxs]
+            weights = self.weights[idxs]
         else:
             shape = self.batch_size, self.n_dims, 1
             tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
-        # jax.debug.print("Sampled tasks max value: {max_value}", max_value=jnp.max(jnp.abs(tasks)))
-        return tasks
+            weights = jnp.exp(task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1))
+        return tasks, weights
 
     @jax.jit
     def evaluate(self, data: Array, tasks: Array, step: int) -> Array:
@@ -208,10 +213,10 @@ class NoisyLinearRegression:
 
     @jax.jit
     def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
-        data, tasks = self.sample_data(step), self.sample_tasks(step)
+        data, (tasks, weights) = self.sample_data(step), self.sample_tasks(step)
         targets = self.evaluate(data, tasks, step)
         attention_mask = self.generate_attention_mask()
-        return data, tasks, targets, attention_mask
+        return data, tasks, weights, targets, attention_mask
 
     @staticmethod
     @jax.jit
@@ -248,7 +253,7 @@ class NoisyLinearRegression:
             name = f"Train tasks"
             config["n_tasks"] = self.n_tasks
             config["name"] = name
-            eval_tasks.append(NoisyLinearRegression.from_task_pool(**config, task_pool=self.task_pool.copy()))
+            eval_tasks.append(NoisyLinearRegression.from_task_pool(**config, task_pool=self.task_pool.copy(), weights=self.weights.copy()))
         
         config["n_tasks"] = 0  # Reset for fresh tasks
 
@@ -277,6 +282,7 @@ class NoisyLinearRegression:
             self.task_key, 
             self.noise_key,
             self.task_pool,
+            self.weights,
             self.data_pool,
             self.data_scale,
             self.task_scale,
@@ -299,13 +305,14 @@ class NoisyLinearRegression:
             'n_max_points': self.n_max_points,
             'name': self.name,
             'eval_ridge': self.eval_ridge,
+            'use_weights': self.use_weights,
         }
         
         return (children, aux_data)
 
     @classmethod
     def _tree_unflatten(cls, aux_data, children):
-        (data_key, task_key, noise_key, task_pool, data_pool,
+        (data_key, task_key, noise_key, task_pool, weights, data_pool,
          data_scale, task_scale, noise_scale, task_center, clip) = children
         
         # Create object with aux_data parameters and placeholder scale values
@@ -317,6 +324,7 @@ class NoisyLinearRegression:
         obj.task_key = task_key
         obj.noise_key = noise_key
         obj.task_pool = task_pool
+        obj.weights = weights
         obj.data_pool = data_pool
         obj.data_scale = data_scale
         obj.task_scale = task_scale

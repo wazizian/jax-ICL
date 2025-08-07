@@ -34,14 +34,15 @@ def initialize(model: Transformer, config: ConfigDict) -> tuple[FrozenDict, Arra
 def get_sharded_batch_sampler(task: Task) -> Sampler:
     n_devices = jax.local_device_count()
 
-    def sample_batch(step: int) -> tuple[Array, Array, Array, Array]:
-        data, tasks, targets, attention_mask = task.sample_batch(step)
+    def sample_batch(step: int) -> tuple[Array, Array, Array, Array, Array]:
+        data, tasks, weights, targets, attention_mask = task.sample_batch(step)
         batch_size = data.shape[0]
         batch_per_device = batch_size // n_devices
         
         # Shard data across devices  
         data = data.reshape(n_devices, batch_per_device, *data.shape[1:])
-        tasks = tasks.reshape(n_devices, batch_per_device, *tasks.shape[1:])  
+        tasks = tasks.reshape(n_devices, batch_per_device, *tasks.shape[1:])
+        weights = weights.reshape(n_devices, batch_per_device, *weights.shape[1:])
         targets = targets.reshape(n_devices, batch_per_device, *targets.shape[1:])
         
         # Expand attention mask to match batch dimensions
@@ -51,18 +52,20 @@ def get_sharded_batch_sampler(task: Task) -> Sampler:
             (n_devices, batch_per_device, *attention_mask.shape)
         )
         
-        return data, tasks, targets, attention_mask
+        return data, tasks, weights, targets, attention_mask
 
     return sample_batch
 
 
-def train_step(state: TrainState, data: Array, targets: Array, attention_mask: Array, dropout_rng: Array) -> TrainState:
+def train_step(state: TrainState, data: Array, weights: Array, targets: Array, attention_mask: Array, dropout_rng: Array) -> TrainState:
     dropout_rng = jr.fold_in(dropout_rng, state.step + 1)
 
     def loss_fn(params):
         preds = state.apply_fn({"params": params}, data, targets, attention_mask, training=True, rngs={"dropout": dropout_rng})
-        loss = jnp.square(preds - targets).mean()
-        return loss, preds
+        # Compute weighted loss: weights should have shape (batch_size,)
+        batch_losses = jnp.square(preds - targets).mean(axis=1)  # Mean over sequence length
+        weighted_loss = jnp.sum(batch_losses * weights)
+        return weighted_loss, preds
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, _), grads = grad_fn(state.params)
@@ -152,9 +155,9 @@ def train(config: ConfigDict) -> None:
     
     for i in range(1, config.training.total_steps + 1):
         # Train step
-        data, _, targets, attention_mask = j_sample_train_batch(i)
+        data, _, weights, targets, attention_mask = j_sample_train_batch(i)
         
-        loss, state = p_train_step(state, data, targets, attention_mask, dropout_rngs)
+        loss, state = p_train_step(state, data, weights, targets, attention_mask, dropout_rngs)
         train_losses.append(loss.item())
         log["train/step"].append(i)
         log["train/lr"].append(float(lr(i)))
