@@ -47,10 +47,11 @@ def load_log(run_id: str) -> dict:
 def plot_training_loss(log: dict, run_id: str):
     """Plot training loss over steps."""
     steps = log["train/step"]
+    eval_steps = log.get("eval/step", [])
     lr_values = log["train/lr"]
     train_losses = log.get("train/loss", [])
     
-    fig, axes = plt.subplots(1, 3, figsize=(10, 12))
+    fig, axes = plt.subplots(3, 1, figsize=(18, 12))
     
     # Plot training loss
     if train_losses:
@@ -72,7 +73,7 @@ def plot_training_loss(log: dict, run_id: str):
     # Plot evaluation metrics
     eval_metrics = {}
     for key, value in log.items():
-        if key.startswith("eval/"):
+        if key.startswith("eval/") and key != "eval/step":
             task_name = key.split("/")[1]
             if task_name not in eval_metrics:
                 eval_metrics[task_name] = {}
@@ -88,7 +89,7 @@ def plot_training_loss(log: dict, run_id: str):
             if "Transformer |" in metric_name:
                 # Convert list of lists to mean values
                 mean_values = [np.mean(v) for v in values]
-                axes[2].plot(steps, mean_values, 
+                axes[2].plot(eval_steps, mean_values, 
                         color=colors[color_idx % len(colors)], 
                         linewidth=2,
                         label=f"{task_name}: {metric_name}")
@@ -98,7 +99,7 @@ def plot_training_loss(log: dict, run_id: str):
     axes[2].set_ylabel("Mean Squared Error")
     axes[2].set_title(f"Evaluation Metrics - {run_id}")
     axes[2].grid(True, alpha=0.3)
-    axes[2].set_yscale('log')
+    # axes[2].set_yscale('log')
     axes[2].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
     plt.tight_layout()
@@ -130,7 +131,7 @@ def print_summary(log: dict, run_id: str):
     # Print final evaluation metrics
     print("\nFinal Evaluation Metrics:")
     for key, value in log.items():
-        if key.startswith("eval/"):
+        if key.startswith("eval/") and key != "eval/step":
             task_name = key.split("/")[1]
             print(f"\n{task_name}:")
             for metric_name, metric_values in value.items():
@@ -143,7 +144,7 @@ def plot_mse_vs_context_length(log: dict, run_id: str):
     """Plot MSE of transformer vs true as a function of context length at final iteration."""
     eval_metrics = {}
     for key, value in log.items():
-        if key.startswith("eval/"):
+        if key.startswith("eval/") and key != "eval/step":
             task_name = key.split("/")[1]
             if task_name not in eval_metrics:
                 eval_metrics[task_name] = {}
@@ -215,19 +216,11 @@ Examples:
             print(f"Error: {e}")
             return 1
     
-    try:
-        log = load_log(run_id)
-        print_summary(log, run_id)
-        plot_training_loss(log, run_id)
-        plot_mse_vs_context_length(log, run_id)
+    log = load_log(run_id)
+    print_summary(log, run_id)
+    plot_training_loss(log, run_id)
+    plot_mse_vs_context_length(log, run_id)
         
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return 1
-    except Exception as e:
-        print(f"Error loading or plotting log: {e}")
-        return 1
-    
     return 0
 
 

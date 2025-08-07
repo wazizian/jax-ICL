@@ -78,7 +78,7 @@ def eval_step(state: TrainState, data: Array, targets: Array, attention_mask: Ar
 
 
 def _init_log(bsln_preds: Preds, n_dims: int) -> dict:
-    log = {"train/step": [], "train/lr": [], "train/loss": []}
+    log = {"train/step": [], "train/lr": [], "train/loss": [], "eval/step": []}
     for _task_name, _task_preds in bsln_preds.items():
         log[f"eval/{_task_name}"] = {}
         for _bsln_name, _bsln_preds in _task_preds.items():
@@ -156,6 +156,9 @@ def train(config: ConfigDict) -> None:
         
         loss, state = p_train_step(state, data, targets, attention_mask, dropout_rngs)
         train_losses.append(loss.item())
+        log["train/step"].append(i)
+        log["train/lr"].append(float(lr(i)))
+        log["train/loss"].append(loss.item())
 
         # Evaluate
         if i % config.eval.every == 0 or i == config.training.total_steps:
@@ -168,16 +171,13 @@ def train(config: ConfigDict) -> None:
             
             # Log step and lr
             logging.info(f"Step: {i} [{t:.2f}s] | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {float(lr(i)):.6f}")
-            log["train/step"].append(i)
-            log["train/lr"].append(float(lr(i)))
-            log["train/loss"].append(avg_train_loss)
             
             # Evaluate model
             eval_preds = get_model_preds(
                 state, p_eval_step, j_samplers_eval_batch, config.eval.n_samples, config.eval.batch_size
             )
-            
             # Log and print all evaluation metrics
+            log["eval/step"].append(i)
             logging.info("=== Evaluation Metrics ===")
             for _task_name, _task_preds in bsln_preds.items():
                 logging.info(f"Task: {_task_name}")

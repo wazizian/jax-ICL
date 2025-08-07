@@ -27,10 +27,10 @@ model:
 
 training:
   optimizer: adam
-  lr: 1.0e-2
+  lr: 1.0e-3
   schedule: warmup_cosine_decay
-  warmup_steps: 2500
-  total_steps: 50000
+  warmup_steps: 5_000
+  total_steps: 100_000
 
 eval:
   n_samples: 2048
@@ -38,16 +38,16 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 5000
+  every: 10_000
   eval_n_points: 128
   eval_ridge: false
   task_centers:
+    - 0.5
+    - 1.0
     - 1.5
     - 2.0
     - 2.5
     - 3.0
-    - 3.5
-    - 4.0
 
 # Hydra settings
 hydra:
