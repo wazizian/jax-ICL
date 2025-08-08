@@ -34,7 +34,7 @@ training:
   lr: 1.0e-2
   schedule: warmup_cosine_decay
   warmup_steps: 5_000
-  total_steps: 40_000
+  total_steps: 80_000
 
 eval:
   n_samples: 2048
