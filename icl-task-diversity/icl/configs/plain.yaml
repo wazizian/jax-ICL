@@ -27,6 +27,7 @@ model:
   n_head: 2
   seed: 100
   use_ln: true
+  use_linear_attention: false
 
 training:
   optimizer: adam

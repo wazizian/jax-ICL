@@ -18,6 +18,7 @@ class GPT2Config:
     bias: bool = True
     dtype: Any = jnp.float32
     use_ln: bool = True
+    use_linear_attention: bool = False
 
 
 # Linear weights and Embedding weights are initialized with mean 0, stddev 0.02 normal random variables.
@@ -58,6 +59,60 @@ class GPT2SelfAttention(nn.Module):
         return y
 
 
+class GPT2LinearSelfAttention(nn.Module):
+    config: GPT2Config
+
+    def setup(self):
+        self.c_attn = nn.Dense(3 * self.config.n_embd, self.config.bias, self.config.dtype, kernel_init=init_fn)
+        self.c_proj = nn.Dense(
+            self.config.n_embd, self.config.bias, self.config.dtype, kernel_init=get_scaled_init_fn(self.config.n_layer)
+        )
+        self.attn_dropout = nn.Dropout(self.config.dropout)
+        self.resid_droput = nn.Dropout(self.config.dropout)
+
+    def __call__(self, x: Array, attention_mask: Array, training: bool = False) -> Array:
+        B, T, C = x.shape  # batch_size, block_size, n_embd
+        q, k, v = jnp.split(self.c_attn(x), 3, axis=2)
+        q = q.reshape(B, T, self.config.n_head, C // self.config.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        k = k.reshape(B, T, self.config.n_head, C // self.config.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        v = v.reshape(B, T, self.config.n_head, C // self.config.n_head).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        
+        # ELU feature maps: φ(x) = ELU(x) + 1
+        phi_q = nn.elu(q) + 1.0  # (B, nh, T, hs)
+        phi_k = nn.elu(k) + 1.0  # (B, nh, T, hs)
+        
+        # Apply attention mask by zeroing out masked positions
+        # For linear attention, we only need to mask the key/value positions
+        # attention_mask shape: (B, T, T), we need the diagonal for valid positions
+        # Reduce (B, T, T) to (B, T) — keep a key if *any* query attends to it
+        # Note: linear attention cannot use the full attention mask like in standard attention
+        # or otherwise we would lose teh speed advantage of linear attention.
+        valid_keys = jnp.any(attention_mask > 0, axis=1).astype(self.config.dtype)  # (B, T)
+        mask = valid_keys[:, None, :, None]  # (B, 1, T, 1)
+
+        phi_k = phi_k * mask.astype(self.config.dtype)
+        v = v * mask.astype(self.config.dtype)
+        
+        # Linear attention: φ(Q) @ (φ(K)^T @ V) / (φ(Q) @ φ(K)^T @ 1)
+        # phi_k: (B, nh, T, hs), v: (B, nh, T, hs)
+        kv = jnp.einsum('bhtd,bhtf->bhdf', phi_k, v)  # (B, nh, hs, hs)
+        k_sum = jnp.sum(phi_k, axis=2, keepdims=True)  # (B, nh, 1, hs)
+        
+        # phi_q: (B, nh, T, hs), kv: (B, nh, hs, hs)
+        numerator = jnp.einsum('bhtd,bhdf->bhtf', phi_q, kv)  # (B, nh, T, hs)
+        # phi_q: (B, nh, T, hs), k_sum: (B, nh, 1, hs)
+        denominator = jnp.einsum('bhtd,bhrd->bhtr', phi_q, k_sum)  # (B, nh, T, 1)
+        
+        # Avoid division by zero
+        denominator = jnp.maximum(denominator, 1e-8)
+        y = numerator / denominator  # (B, nh, T, hs)
+        
+        y = self.attn_dropout(y, deterministic=not training)
+        y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
+        y = self.resid_droput(self.c_proj(y), deterministic=not training)
+        return y
+
+
 class GPT2MLP(nn.Module):
     config: GPT2Config
 
@@ -82,7 +137,10 @@ class GPT2Block(nn.Module):
     def setup(self):
         if self.config.use_ln:
             self.ln_1 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
-        self.attn = GPT2SelfAttention(self.config)
+        if self.config.use_linear_attention:
+            self.attn = GPT2LinearSelfAttention(self.config)
+        else:
+            self.attn = GPT2SelfAttention(self.config)
         if self.config.use_ln:
             self.ln_2 = nn.LayerNorm(1e-5, self.config.dtype, use_bias=self.config.bias)
         self.mlp = GPT2MLP(self.config)

@@ -38,6 +38,7 @@ class Transformer(nn.Module):
     seed: int
     dtype: Any
     use_ln: bool = True
+    use_linear_attention: bool = False
 
     def setup(self):
         config = GPT2Config(
@@ -47,6 +48,7 @@ class Transformer(nn.Module):
             n_embd=self.n_embd,
             dtype=self.dtype,
             use_ln=self.use_ln,
+            use_linear_attention=self.use_linear_attention,
         )
         self._in = nn.Dense(self.n_embd, False, self.dtype, kernel_init=init_fn)
         self._h = GPT2Model(config)
