@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import curve_fit
 
 
 def get_most_recent_run() -> str:
@@ -129,6 +130,76 @@ def plot_training_loss(log: dict, run_id: str):
     print(f"Plot saved to: {output_path}")
     
     plt.show()
+
+
+def icl_power_law(k, D, alpha, C):
+    """Power law function: D/(k+1)^alpha + C"""
+    return D / ((k + 1) ** alpha) + C
+
+
+def fit_mse_curves_and_compute_metrics(log: dict, run_id: str):
+    """Fit MSE curves and compute ICL performance metrics."""
+    eval_steps = log.get("eval/step", [])
+    if not eval_steps:
+        print("No evaluation steps found in log")
+        return
+    
+    # Extract evaluation metrics for the final step
+    final_step_idx = -1
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/") and key != "eval/step":
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+    
+    print(f"\n=== ICL Performance Metrics Analysis: {run_id} ===")
+    print("Fitting MSE curves with formula: D/(k+1)^alpha + C")
+    print("where k is context length (0-indexed), D = init error at k=0 - C")
+    
+    for task_name, metrics in eval_metrics.items():
+        print(f"\n{task_name}:")
+        
+        for metric_name, values in metrics.items():
+            if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
+                # Get MSE values for final step
+                mse_values = values[final_step_idx]
+                if not mse_values or len(mse_values) < 3:
+                    continue
+                    
+                k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+                
+                try:
+                    # Fit the power law curve
+                    # Initial guess: D = mse_values[0] - min(mse_values), alpha = 1, C = min(mse_values)
+                    initial_guess = [mse_values[0] - np.min(mse_values), 1.0, np.min(mse_values)]
+                    
+                    popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
+                                         bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
+                    
+                    D_fit, alpha_fit, C_fit = popt
+                    
+                    # Compute metrics
+                    avg_performance = np.mean(mse_values)
+                    
+                    # Compute R-squared
+                    y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
+                    ss_res = np.sum((mse_values - y_pred) ** 2)
+                    ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
+                    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                    
+                    print(f"  {metric_name}:")
+                    print(f"    Average MSE over k: {avg_performance:.6f}")
+                    print(f"    Power law fit - alpha: {alpha_fit:.4f}, C: {C_fit:.6f}")
+                    print(f"    D (init error - C): {D_fit:.6f}")
+                    print(f"    R²: {r_squared:.4f}")
+                    
+                except Exception as e:
+                    print(f"  {metric_name}: Failed to fit curve - {str(e)}")
+                    avg_performance = np.mean(mse_values)
+                    print(f"    Average MSE over k: {avg_performance:.6f}")
 
 
 def print_summary(log: dict, run_id: str):
@@ -288,6 +359,7 @@ Examples:
     
     log = load_log(run_id)
     print_summary(log, run_id)
+    fit_mse_curves_and_compute_metrics(log, run_id)
     plot_training_loss(log, run_id)
     plot_icl_for_all_steps(log, run_id)
         

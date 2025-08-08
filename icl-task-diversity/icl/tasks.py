@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array, tree_util
 from functools import partial
+import chex
 
 from icl.models import Model, get_model
 
@@ -168,7 +169,8 @@ class NoisyLinearRegression:
         shape = self.n_tasks, self.n_dims, 1
         tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
         log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
-        weights = jax.nn.softmax(log_weights, axis=0)
+        #weights = jax.nn.softmax(log_weights, axis=0)
+        weights = log_weights
         return tasks, weights
 
     def generate_data_pool(self) -> Array:
@@ -193,15 +195,21 @@ class NoisyLinearRegression:
         key = jax.random.fold_in(self.task_key, step)
         if self.n_tasks > 0:
             idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
+            # jax.debug.print("Sampled indices for tasks: {}", idxs)
             tasks = self.task_pool[idxs]
-            weights = self.weights[idxs]
+            # log_weights = self.weights[idxs] 
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
+            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.n_dims, 1
             tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
-            weights = jnp.exp(task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1))
-            # norm_factor = task_weights_trunc_norm_factor(self.task_center, self.task_scale, self.clip, self.use_weights, self.n_dims)
-            norm_factor = jnp.sum(weights) / self.batch_size  # Empirical normalization
-            weights = weights / norm_factor
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
+            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+        chex.assert_shape(tasks, (self.batch_size, self.n_dims, 1))
+        chex.assert_shape(weights, (self.batch_size, 1))
+        # jax.debug.print("Weights sum: {}", jnp.sum(weights))
+        # jax.debug.print("Batch statistics: tasks min {}, max {}, mean {}",
+        #                jnp.min(tasks), jnp.max(tasks), jnp.mean(tasks))
         return tasks, weights
 
     @jax.jit
