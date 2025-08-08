@@ -197,7 +197,8 @@ class NoisyLinearRegression:
             idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
             # jax.debug.print("Sampled indices for tasks: {}", idxs)
             tasks = self.task_pool[idxs]
-            log_weights = self.weights[idxs] 
+            # log_weights = self.weights[idxs] 
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
             weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.n_dims, 1
