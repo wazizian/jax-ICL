@@ -194,7 +194,7 @@ class NoisyLinearRegression:
         key = jax.random.fold_in(self.task_key, step)
         if self.n_tasks > 0:
             idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
-            jax.debug.print("Sampling tasks from pool with indices: {}", idxs)
+            # jax.debug.print("Sampling tasks from pool with indices: {}", idxs)
             tasks = self.task_pool[idxs]
             weights = self.weights[idxs] 
             weights /= jnp.sum(weights)  # Normalize weights to sum to 1
