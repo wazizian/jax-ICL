@@ -4,7 +4,7 @@ log_level: INFO
 
 task:
   name: noisy_linear_regression
-  n_tasks: 10_000_000
+  n_tasks: 12_000_000
   n_data: 0
   n_dims: 4
   n_points: 128
