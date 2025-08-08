@@ -103,7 +103,7 @@ def train(config: ConfigDict) -> None:
     exp_dir = Path(hydra_cfg.runtime.output_dir)
     exp_name = f"train_{u.get_hash(config)}"
     
-    logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\nCONFIG:\n{config}")
+    logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\n")
     
     # Validate config 
     assert config.model.n_points == config.task.n_points, "Model n_points must match Task n_points"
