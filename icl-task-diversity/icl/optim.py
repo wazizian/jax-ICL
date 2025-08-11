@@ -31,6 +31,16 @@ def get_optimizer_and_lr_schedule(
             weight_decay=kwargs["weight_decay"],
             mask=tu.tree_map_with_path(lambda kp, _: kp[0].key == "_h" and kp[-1].key == "kernel", kwargs["params"]),
         )
+    elif optimizer == "adamw_attn":
+        def wd_mask_attn_only(kp, _):
+            names = [k.key for k in kp]
+            is_kernel = names[-1] == "kernel"
+            in_attn = "attn" in names
+            is_attn_weight = any(n in {"c_attn", "c_proj"} for n in names)
+            return is_kernel and in_attn and is_attn_weight
+
+        mask = tu.tree_map_with_path(wd_mask_attn_only, kwargs["params"])
+        tx = optax.adamw(lr, weight_decay=kwargs["weight_decay"], mask=mask)
     else:
         raise NotImplementedError
     return tx, lr

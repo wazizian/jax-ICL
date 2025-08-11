@@ -34,6 +34,26 @@ def get_most_recent_run() -> str:
     return run_dirs[-1]  # Return the most recent (last when sorted)
 
 
+def get_most_recent_multirun() -> str:
+    """Find the most recent multirun ID in the outputs/multirun directory."""
+    multirun_dir = Path("outputs/multirun")
+    if not multirun_dir.exists():
+        raise FileNotFoundError("outputs/multirun directory not found")
+    
+    # Find all multirun directories with multirun.yaml files
+    multirun_dirs = []
+    for run_dir in multirun_dir.iterdir():
+        if run_dir.is_dir() and (run_dir / "multirun.yaml").exists():
+            multirun_dirs.append(run_dir.name)
+    
+    if not multirun_dirs:
+        raise FileNotFoundError("No completed multiruns found (no multirun.yaml files)")
+    
+    # Sort by folder name (date format: 2025-08-11_11-45-46)
+    multirun_dirs.sort()
+    return multirun_dirs[-1]  # Return the most recent (last when sorted)
+
+
 def load_log(run_id: str) -> dict:
     """Load the log.json file for a given run ID."""
     log_path = Path("outputs") / run_id / "log.json"
@@ -45,7 +65,7 @@ def load_log(run_id: str) -> dict:
         return json.load(f)
 
 
-def plot_training_loss(log: dict, run_id: str):
+def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
     """Plot training loss over steps."""
     steps = log["train/step"]
     eval_steps = log.get("eval/step", [])
@@ -125,7 +145,9 @@ def plot_training_loss(log: dict, run_id: str):
     plt.tight_layout()
     
     # Save plot
-    output_path = Path("outputs") / run_id / "training_analysis.png"
+    if output_dir is None:
+        output_dir = Path("outputs") / run_id
+    output_path = output_dir / "training_analysis.png"
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"Plot saved to: {output_path}")
     
@@ -134,7 +156,116 @@ def plot_training_loss(log: dict, run_id: str):
 
 def icl_power_law(k, D, alpha, C):
     """Power law function: D/(k+1)^alpha + C"""
-    return D / ((k + 1) ** alpha) + C
+    # return D / ((k + 1) ** alpha) + C
+    return C / ((k + 1) ** alpha)
+
+
+def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
+    """Extract minimum MSE over context length and time to reach minimum MSE for all tasks.
+    
+    Returns:
+        tuple: (min_mse_dict, time_to_min_dict) where:
+            min_mse_dict: {task_name: min_mse}
+            time_to_min_dict: {task_name: time_to_min_mse}
+    """
+    eval_steps = log.get("eval/step", [])
+    if not eval_steps:
+        return {}, {}
+    
+    # Extract evaluation metrics for the final step
+    final_step_idx = -1
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/") and key != "eval/step":
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+    
+    min_mse_results = {}
+    time_to_min_results = {}
+    
+    for task_name, metrics in eval_metrics.items():
+        if "Fixed task" not in task_name:
+            continue
+        for metric_name, values in metrics.items():
+            if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
+                # Find the step with minimum MSE across all context lengths and time steps
+                min_global_mse = float('inf')
+                time_to_min = float('inf') 
+                
+                for step_idx, step_mse_values in enumerate(values):
+                    if step_mse_values:
+                        step_min_mse = min(step_mse_values)
+                        if step_min_mse < min_global_mse:
+                            min_global_mse = step_min_mse
+                            time_to_min = step_mse_values.index(min_global_mse)  # Get the index of the minimum MSE in this step
+                
+                time_to_min_results[task_name] = time_to_min
+                min_mse_results[task_name] = min_global_mse
+                break  # Only take the first valid metric per task
+    
+    return min_mse_results, time_to_min_results
+
+
+def extract_power_law_params(log: dict) -> dict:
+    """Extract power law parameters (alpha, C) for all tasks from log data.
+    
+    Returns:
+        dict: {task_name: (alpha, C, r_squared)} for successfully fitted tasks
+    """
+    eval_steps = log.get("eval/step", [])
+    if not eval_steps:
+        return {}
+    
+    # Extract evaluation metrics for the final step
+    final_step_idx = -1
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/") and key != "eval/step":
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+    
+    results = {}
+    
+    for task_name, metrics in eval_metrics.items():
+        for metric_name, values in metrics.items():
+            if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
+                # Get MSE values for final step
+                mse_values = values[final_step_idx]
+                if not mse_values or len(mse_values) < 3:
+                    continue
+                    
+                k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+                
+                try:
+                    # Fit the power law curve
+                    # initial_guess = [mse_values[0] - np.min(mse_values), 1.0, np.min(mse_values)]
+                    initial_guess = [0., 1.0, mse_values[0]]
+                    
+                    popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
+                                         bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
+                    
+                    D_fit, alpha_fit, C_fit = popt
+                    
+                    # Compute R-squared
+                    y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
+                    ss_res = np.sum((mse_values - y_pred) ** 2)
+                    ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
+                    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                    
+                    results[task_name] = (alpha_fit, C_fit, r_squared)
+                    break  # Only take the first valid metric per task
+                    
+                except Exception as e:
+                    # Skip failed fits
+                    continue
+    
+    return results
 
 
 def fit_mse_curves_and_compute_metrics(log: dict, run_id: str):
@@ -230,7 +361,7 @@ def print_summary(log: dict, run_id: str):
                     print(f"  {metric_name}: {final_mse:.6f}")
 
 
-def plot_icl_for_all_steps(log: dict, run_id: str):
+def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
     """Plot MSE and Relative Error vs context length for every evaluation step."""
     eval_steps = log.get("eval/step", [])
     if not eval_steps:
@@ -248,8 +379,10 @@ def plot_icl_for_all_steps(log: dict, run_id: str):
                 eval_metrics[task_name][metric_name] = metric_values
     
     # Create output directories for ICL plots
-    icl_mse_dir = Path("outputs") / run_id / "icl_plots_mse"
-    icl_rel_err_dir = Path("outputs") / run_id / "icl_plots_rel_err"
+    if output_dir is None:
+        output_dir = Path("outputs") / run_id
+    icl_mse_dir = output_dir / "icl_plots_mse"
+    icl_rel_err_dir = output_dir / "icl_plots_rel_err"
     icl_mse_dir.mkdir(exist_ok=True)
     icl_rel_err_dir.mkdir(exist_ok=True)
     
@@ -329,6 +462,450 @@ def plot_icl_for_all_steps(log: dict, run_id: str):
     print(f"ICL Relative Error plots for {len(eval_steps)} steps saved to: {icl_rel_err_dir}")
 
 
+def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
+    """Plot alpha and C parameters vs task shift for multiple runs.
+    
+    Args:
+        run_paths: List of Path objects pointing to runs or multirun subdirs
+        output_dir: Directory to save plots (optional)
+        run_labels: Custom labels for runs (optional)
+    """
+    if not run_paths:
+        print("No run paths provided for task shift analysis")
+        return
+    
+    # Collect data from all runs
+    data = {}  # {run_label: [(task_center, alpha, C, r_squared, task_name), ...]}
+    
+    for i, run_path in enumerate(run_paths):
+        run_path = Path(run_path)
+        
+        # Determine run label
+        if run_labels and i < len(run_labels):
+            run_label = run_labels[i]
+        else:
+            run_label = run_path.name
+        
+        # Check if this is a multirun directory or single run
+        if (run_path / "multirun.yaml").exists():
+            # This is a multirun directory - we want to analyze each subrun separately
+            subdirs = []
+            for subdir in run_path.iterdir():
+                if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
+                    subdirs.append(subdir)
+            
+            # Sort numerically
+            subdirs.sort(key=lambda x: int(x.name))
+            
+            # Process each subrun as a separate run
+            for subdir in subdirs:
+                # Load config and log for this subrun
+                config_path = subdir / "config.json"
+                log_path = subdir / "log.json"
+                
+                if not config_path.exists() or not log_path.exists():
+                    continue
+                
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                with open(log_path, 'r') as f:
+                    log = json.load(f)
+                
+                # Extract task centers from config
+                task_centers = config.get('eval', {}).get('task_centers', [])
+                
+                # Extract power law parameters for all tasks
+                power_law_params = extract_power_law_params(log)
+                
+                # Create run data for this subrun
+                subrun_label = f"{run_label}-{subdir.name}"
+                run_data = []
+                
+                # Add Test tasks (task center = 0)
+                if "Test tasks" in power_law_params:
+                    alpha, C, r_squared = power_law_params["Test tasks"]
+                    run_data.append((0.0, alpha, C, r_squared, "Test tasks"))
+                
+                # Add Fixed tasks
+                for task_center in task_centers:
+                    task_name = f"Fixed task {task_center}"
+                    if task_name in power_law_params:
+                        alpha, C, r_squared = power_law_params[task_name]
+                        run_data.append((task_center, alpha, C, r_squared, task_name))
+                
+                if run_data:
+                    data[subrun_label] = run_data
+        
+        elif (run_path / "log.json").exists():
+            # This is a single run
+            config_path = run_path / "config.json"
+            log_path = run_path / "log.json"
+            
+            if not config_path.exists():
+                continue
+            
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            with open(log_path, 'r') as f:
+                log = json.load(f)
+            
+            # Extract task centers from config
+            task_centers = config.get('eval', {}).get('task_centers', [])
+            
+            # Extract power law parameters for all tasks
+            power_law_params = extract_power_law_params(log)
+            
+            run_data = []
+            
+            # Add Test tasks (task center = 0)
+            if "Test tasks" in power_law_params:
+                alpha, C, r_squared = power_law_params["Test tasks"]
+                run_data.append((0.0, alpha, C, r_squared, "Test tasks"))
+            
+            # Add Fixed tasks
+            for task_center in task_centers:
+                task_name = f"Fixed task {task_center}"
+                if task_name in power_law_params:
+                    alpha, C, r_squared = power_law_params[task_name]
+                    run_data.append((task_center, alpha, C, r_squared, task_name))
+            
+            if run_data:
+                data[run_label] = run_data
+        
+        else:
+            print(f"Warning: {run_path} is neither a valid run nor multirun directory")
+            continue
+    
+    if not data:
+        print("No valid data found for task shift analysis")
+        return
+    
+    # Create the plots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+    max_shift = float('inf')
+    
+    for i, (run_label, run_data) in enumerate(data.items()):
+        if not run_data:
+            continue
+        
+        # Sort by task center
+        run_data.sort(key=lambda x: x[0])
+        
+        task_centers = [x[0] for x in run_data if x[0] <= max_shift]
+        alphas = [x[1] for x in run_data if x[0] <= max_shift]
+        Cs = [x[2] for x in run_data if x[0] <= max_shift]
+        
+        color = colors[i % len(colors)]
+        
+        # Plot alpha vs task center
+        ax1.plot(task_centers, alphas, 'o-', color=color, linewidth=2, 
+                markersize=6, label=run_label)
+        
+        # Plot C vs task center
+        ax2.plot(task_centers, Cs, 'o-', color=color, linewidth=2, 
+                markersize=6, label=run_label)
+    
+    # Configure alpha plot
+    ax1.set_xlabel("Task Center (Task Shift)")
+    ax1.set_ylabel("Alpha (Power Law Exponent)")
+    ax1.set_title("Alpha vs Task Shift")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Configure C plot
+    ax2.set_xlabel("Task Center (Task Shift)")
+    ax2.set_ylabel("C (Asymptotic Error)")
+    ax2.set_title("C vs Task Shift")
+    ax2.grid(True, alpha=0.3)
+    ax2.set_yscale('log')
+    ax2.legend()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    if output_dir is None:
+        # Check if we're analyzing multiruns by looking at the first run path
+        if run_paths and (run_paths[0] / "multirun.yaml").exists():
+            output_dir = run_paths[0]  # Use the multirun directory
+        else:
+            output_dir = Path("outputs")
+    output_path = output_dir / "task_shift_analysis.png"
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Task shift analysis plot saved to: {output_path}")
+    
+    plt.show()
+    
+    # Print summary
+    print(f"\n=== Task Shift Analysis Summary ===")
+    for run_label, run_data in data.items():
+        if not run_data:
+            continue
+        print(f"\n{run_label}:")
+        for task_center, alpha, C, r_squared, task_name in sorted(run_data, key=lambda x: x[0]):
+            print(f"  {task_name} (center={task_center}): alpha={alpha:.4f}, C={C:.6f}, R²={r_squared:.4f}")
+
+
+def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
+    """Plot minimum MSE vs task shift and time to reach minimum MSE for multiple runs.
+    
+    Args:
+        run_paths: List of Path objects pointing to runs or multirun subdirs
+        output_dir: Directory to save plots (optional)
+        run_labels: Custom labels for runs (optional)
+    """
+    if not run_paths:
+        print("No run paths provided for minimum MSE analysis")
+        return
+    
+    # Collect minimum MSE and time-to-minimum data from all runs
+    min_mse_data = {}  # {run_label: [(task_center, min_mse, task_name), ...]}
+    time_to_min_data = {}  # {run_label: [(task_center, time_to_min, task_name), ...]}
+    
+    for i, run_path in enumerate(run_paths):
+        run_path = Path(run_path)
+        
+        # Determine run label
+        if run_labels and i < len(run_labels):
+            run_label = run_labels[i]
+        else:
+            run_label = run_path.name
+        
+        # Check if this is a multirun directory or single run
+        if (run_path / "multirun.yaml").exists():
+            # This is a multirun directory - we want to analyze each subrun separately
+            subdirs = []
+            for subdir in run_path.iterdir():
+                if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
+                    subdirs.append(subdir)
+            
+            # Sort numerically
+            subdirs.sort(key=lambda x: int(x.name))
+            
+            # Process each subrun as a separate run
+            for subdir in subdirs:
+                # Load config and log for this subrun
+                config_path = subdir / "config.json"
+                log_path = subdir / "log.json"
+                
+                if not config_path.exists() or not log_path.exists():
+                    continue
+                
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                with open(log_path, 'r') as f:
+                    log = json.load(f)
+                
+                # Extract task centers from config
+                task_centers = config.get('eval', {}).get('task_centers', [])
+                
+                # Extract minimum MSE and time-to-minimum for all tasks
+                min_mse_params, time_to_min_params = extract_min_mse_params(log)
+                
+                # Create run data for this subrun
+                subrun_label = f"{run_label}-{subdir.name}"
+                min_mse_run_data = []
+                time_to_min_run_data = []
+                
+                # Add Test tasks (task center = 0)
+                if "Test tasks" in min_mse_params:
+                    min_mse = min_mse_params["Test tasks"]
+                    time_to_min = time_to_min_params.get("Test tasks", 0)
+                    min_mse_run_data.append((0.0, min_mse, "Test tasks"))
+                    time_to_min_run_data.append((0.0, time_to_min, "Test tasks"))
+                
+                # Add Fixed tasks
+                for task_center in task_centers:
+                    task_name = f"Fixed task {task_center}"
+                    if task_name in min_mse_params:
+                        min_mse = min_mse_params[task_name]
+                        time_to_min = time_to_min_params.get(task_name, 0)
+                        min_mse_run_data.append((task_center, min_mse, task_name))
+                        time_to_min_run_data.append((task_center, time_to_min, task_name))
+                
+                if min_mse_run_data:
+                    min_mse_data[subrun_label] = min_mse_run_data
+                    time_to_min_data[subrun_label] = time_to_min_run_data
+        
+        elif (run_path / "log.json").exists():
+            # This is a single run
+            config_path = run_path / "config.json"
+            log_path = run_path / "log.json"
+            
+            if not config_path.exists():
+                continue
+            
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            with open(log_path, 'r') as f:
+                log = json.load(f)
+            
+            # Extract task centers from config
+            task_centers = config.get('eval', {}).get('task_centers', [])
+            
+            # Extract minimum MSE and time-to-minimum for all tasks
+            min_mse_params, time_to_min_params = extract_min_mse_params(log)
+            
+            min_mse_run_data = []
+            time_to_min_run_data = []
+            
+            # Add Test tasks (task center = 0)
+            if "Test tasks" in min_mse_params:
+                min_mse = min_mse_params["Test tasks"]
+                time_to_min = time_to_min_params.get("Test tasks", 0)
+                min_mse_run_data.append((0.0, min_mse, "Test tasks"))
+                time_to_min_run_data.append((0.0, time_to_min, "Test tasks"))
+            
+            # Add Fixed tasks
+            for task_center in task_centers:
+                task_name = f"Fixed task {task_center}"
+                if task_name in min_mse_params:
+                    min_mse = min_mse_params[task_name]
+                    time_to_min = time_to_min_params.get(task_name, 0)
+                    min_mse_run_data.append((task_center, min_mse, task_name))
+                    time_to_min_run_data.append((task_center, time_to_min, task_name))
+            
+            if min_mse_run_data:
+                min_mse_data[run_label] = min_mse_run_data
+                time_to_min_data[run_label] = time_to_min_run_data
+        
+        else:
+            print(f"Warning: {run_path} is neither a valid run nor multirun directory")
+            continue
+    
+    if not min_mse_data:
+        print("No valid data found for minimum MSE analysis")
+        return
+    
+    # Create the plot with two subplots in a separate figure
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+    max_shift = float('inf')
+    
+    # Plot minimum MSE data (left subplot)
+    for i, (run_label, run_data) in enumerate(min_mse_data.items()):
+        if not run_data:
+            continue
+        
+        # Sort by task center
+        run_data.sort(key=lambda x: x[0])
+        
+        task_centers = [x[0] for x in run_data if x[0] <= max_shift]
+        min_mses = [x[1] for x in run_data if x[0] <= max_shift]
+        
+        color = colors[i % len(colors)]
+        
+        # Plot minimum MSE vs task center
+        ax1.plot(task_centers, min_mses, 'o-', color=color, linewidth=2, 
+                markersize=6, label=run_label)
+    
+    # Configure minimum MSE plot
+    ax1.set_xlabel("Task Center (Task Shift)")
+    ax1.set_ylabel("Minimum MSE")
+    ax1.set_title("Minimum MSE vs Task Shift")
+    ax1.grid(True, alpha=0.3)
+    ax1.set_yscale('log')
+    ax1.legend()
+    
+    # Plot time to minimum MSE data (right subplot)
+    for i, (run_label, run_data) in enumerate(time_to_min_data.items()):
+        if not run_data:
+            continue
+        
+        # Sort by task center
+        run_data.sort(key=lambda x: x[0])
+        
+        task_centers = [x[0] for x in run_data if x[0] <= max_shift]
+        times_to_min = [x[1] for x in run_data if x[0] <= max_shift]
+        
+        color = colors[i % len(colors)]
+        
+        # Plot time to minimum MSE vs task center
+        ax2.plot(task_centers, times_to_min, 'o-', color=color, linewidth=2, 
+                markersize=6, label=run_label)
+    
+    # Configure time to minimum MSE plot
+    ax2.set_xlabel("Task Center (Task Shift)")
+    ax2.set_ylabel("Context Needed for Minimum MSE (Context Length)")
+    ax2.set_title("Context Needed for Minimum MSE vs Task Shift")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    if output_dir is None:
+        # Check if we're analyzing multiruns by looking at the first run path
+        if run_paths and (run_paths[0] / "multirun.yaml").exists():
+            output_dir = run_paths[0]  # Use the multirun directory
+        else:
+            output_dir = Path("outputs")
+    output_path = output_dir / "min_mse_analysis.png"
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Minimum MSE analysis plot saved to: {output_path}")
+    
+    plt.show()
+    
+    # Print summary
+    print(f"\n=== Minimum MSE Analysis Summary ===")
+    for run_label, run_data in min_mse_data.items():
+        if not run_data:
+            continue
+        print(f"\n{run_label}:")
+        time_data = time_to_min_data.get(run_label, [])
+        time_dict = {x[2]: x[1] for x in time_data}  # task_name -> time_to_min
+        
+        for task_center, min_mse, task_name in sorted(run_data, key=lambda x: x[0]):
+            time_to_min = time_dict.get(task_name, "N/A")
+            print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, time_to_min={time_to_min}")
+
+
+def analyze_multirun(multirun_id: str):
+    """Analyze all runs within a multirun experiment."""
+    multirun_dir = Path("outputs/multirun") / multirun_id
+    
+    if not multirun_dir.exists():
+        raise FileNotFoundError(f"Multirun directory not found: {multirun_dir}")
+    
+    # Find all subdirectories with log.json files
+    run_subdirs = []
+    for subdir in multirun_dir.iterdir():
+        if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
+            run_subdirs.append(subdir.name)
+    
+    if not run_subdirs:
+        raise FileNotFoundError(f"No completed runs found in multirun {multirun_id}")
+    
+    # Sort subdirectories numerically
+    run_subdirs.sort(key=int)
+    
+    print(f"\n=== Analyzing Multirun: {multirun_id} ===")
+    print(f"Found {len(run_subdirs)} completed runs: {', '.join(run_subdirs)}")
+    
+    for subdir_name in run_subdirs:
+        print(f"\n--- Analyzing run {subdir_name} ---")
+        
+        # Load log for this run
+        log_path = multirun_dir / subdir_name / "log.json"
+        with open(log_path, "r") as f:
+            log = json.load(f)
+        
+        # Create run identifier for display
+        run_display_id = f"{multirun_id}/{subdir_name}"
+        
+        # Run all analysis functions for this individual run
+        print_summary(log, run_display_id)
+        fit_mse_curves_and_compute_metrics(log, run_display_id)
+        
+        # For plotting functions, pass the custom output directory
+        run_output_dir = Path("outputs/multirun") / multirun_id / subdir_name
+        plot_training_loss(log, run_display_id, run_output_dir)
+        plot_icl_for_all_steps(log, run_display_id, run_output_dir)
+
+
+
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze training logs and plot metrics",
@@ -337,6 +914,9 @@ def main():
 Examples:
   python analyze.py                    # Analyze most recent run
   python analyze.py 2025-08-06_12-24-25   # Analyze specific run
+  python analyze.py --multirun         # Analyze most recent multirun
+  python analyze.py --multirun 2025-08-11_11-45-46   # Analyze specific multirun
+  python analyze.py --multirun --shift-analysis 2025-08-11_11-45-46   # Task shift analysis
         """
     )
     parser.add_argument(
@@ -344,24 +924,93 @@ Examples:
         nargs='?', 
         help='Run ID to analyze (e.g., 2025-08-06_12-24-25). If not provided, uses most recent run.'
     )
+    parser.add_argument(
+        '--multirun',
+        action='store_true',
+        help='Analyze a multirun experiment instead of a single run'
+    )
+    parser.add_argument(
+        '--shift-analysis',
+        action='store_true',
+        help='Perform task shift analysis (alpha and C vs task centers)'
+    )
     
     args = parser.parse_args()
     
-    if args.run_id:
-        run_id = args.run_id
-    else:
+    if args.shift_analysis:
+        # Handle distribution shift analysis
+        if args.multirun:
+            # Distribution analysis for multirun(s)
+            if args.run_id:
+                multirun_ids = [args.run_id]
+            else:
+                try:
+                    multirun_ids = [get_most_recent_multirun()]
+                    print(f"Using most recent multirun: {multirun_ids[0]}")
+                except FileNotFoundError as e:
+                    print(f"Error: {e}")
+                    return 1
+            
+            # Convert to full paths
+            run_paths = [Path("outputs/multirun") / multirun_id for multirun_id in multirun_ids]
+        else:
+            # Distribution analysis for single run(s) - not typical but supported
+            if args.run_id:
+                run_ids = [args.run_id]
+            else:
+                try:
+                    run_ids = [get_most_recent_run()]
+                    print(f"Using most recent run: {run_ids[0]}")
+                except FileNotFoundError as e:
+                    print(f"Error: {e}")
+                    return 1
+            
+            # Convert to full paths
+            run_paths = [Path("outputs") / run_id for run_id in run_ids]
+        
+        # Perform task shift analysis
         try:
-            run_id = get_most_recent_run()
-            print(f"Using most recent run: {run_id}")
+            plot_task_shift_analysis(run_paths)
+            plot_min_mse_analysis(run_paths)
+        except Exception as e:
+            print(f"Error in task shift analysis: {e}")
+            return 1
+            
+    elif args.multirun:
+        # Handle multirun analysis
+        if args.run_id:
+            multirun_id = args.run_id
+        else:
+            try:
+                multirun_id = get_most_recent_multirun()
+                print(f"Using most recent multirun: {multirun_id}")
+            except FileNotFoundError as e:
+                print(f"Error: {e}")
+                return 1
+        
+        # Analyze the multirun
+        try:
+            analyze_multirun(multirun_id)
         except FileNotFoundError as e:
             print(f"Error: {e}")
             return 1
-    
-    log = load_log(run_id)
-    print_summary(log, run_id)
-    fit_mse_curves_and_compute_metrics(log, run_id)
-    plot_training_loss(log, run_id)
-    plot_icl_for_all_steps(log, run_id)
+    else:
+        # Handle single run analysis (existing behavior)
+        if args.run_id:
+            run_id = args.run_id
+        else:
+            try:
+                run_id = get_most_recent_run()
+                print(f"Using most recent run: {run_id}")
+            except FileNotFoundError as e:
+                print(f"Error: {e}")
+                return 1
+        
+        log = load_log(run_id)
+        print_summary(log, run_id)
+        fit_mse_curves_and_compute_metrics(log, run_id)
+        plot_training_loss(log, run_id)
+        plot_icl_for_all_steps(log, run_id)
         
     return 0
 

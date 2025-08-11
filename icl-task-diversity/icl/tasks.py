@@ -97,8 +97,6 @@ def sample_distrib(
         return sample_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
     elif distrib_name == "student":
         # jax.debug.print("Sampling from student-t distribution with loc {}, scale {}, df {}, clip {}", loc, scale, distrib_param, clip)
-        if clip is not None:
-            raise NotImplementedError("Student-t distribution with clipping not implemented")
         if distrib_param is None:
             raise ValueError("distrib_param (degrees of freedom) must be specified for student-t distribution")
         if clip is None:
@@ -235,9 +233,6 @@ class NoisyLinearRegression:
 
     def __post_init__(self):
         # Validation
-        if self.distrib_name == "student" and self.clip is not None:
-            raise NotImplementedError("Student-t distribution with clipping not implemented")
-            
         self.data_key = jax.random.PRNGKey(self.data_seed)
         self.task_key = jax.random.PRNGKey(self.task_seed)
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
@@ -388,6 +383,7 @@ class NoisyLinearRegression:
 
         # Test with fixed task centers
         if task_centers is not None:
+            config["distrib_name"] = "normal"  # Reset to normal distribution for fixed tasks
             for task_center in task_centers:
                 config["task_center"] = task_center
                 # config["task_scale"] = 0.

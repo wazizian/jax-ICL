@@ -24,19 +24,19 @@ task:
 model:
   name: transformer
   n_points: 128
-  n_layer: 4
+  n_layer: 8
   n_embd: 32
-  n_head: 2
+  n_head: 8
   seed: 100
   use_ln: true
   use_linear_attention: false
 
 training:
   optimizer: adam
-  lr: 1.0e-3
+  lr: 2.0e-3
   schedule: warmup_cosine_decay
-  warmup_steps: 5_000
-  total_steps: 80_000
+  warmup_steps: 40_000
+  total_steps: 500_000
 
 eval:
   n_samples: 2048
@@ -47,6 +47,7 @@ eval:
   every: 5_000
   eval_n_points: 128
   task_centers:
+    - 0.
     - 0.25
     - 0.5
     - 0.75
@@ -55,6 +56,14 @@ eval:
     - 1.5
     - 1.75
     - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.25
+    - 3.5
+    - 3.75
+    - 4.0
 
 # Hydra settings
 hydra:
