@@ -20,6 +20,32 @@ Sampler = Callable[[int], tuple[Array, Array, Array, Array, Array]]
 def get_task_name(task: "Task") -> str:
     return task.name 
 
+@partial(jax.jit, static_argnames=("shape", "dtype"))
+def sample_truncated_normal(
+        key: jax.random.PRNGKey,
+        loc: Array,
+        scale: Array,
+        clip: float,
+        shape: tuple[int, ...],
+        dtype: Any = jnp.float32
+        ) -> Array:
+    def cond_fun(val):
+        _, x = val
+        return jnp.any(jnp.abs(x) > clip)
+
+    def body_fun(val):
+        key, x = val
+        key, subkey = jax.random.split(key)
+        new_sample = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
+        new_x = jax.lax.select(jnp.abs(x) > clip, new_sample, x)
+        return key, new_x
+
+    key, subkey = jax.random.split(key)
+    init_x = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
+    init_val = (key, init_x)
+    _, final_x = jax.lax.while_loop(cond_fun, body_fun, init_val)
+    return final_x
+
 def sample_multivariate_gaussian(
         key: jax.random.PRNGKey,
         loc: Array,
@@ -39,21 +65,75 @@ def sample_multivariate_gaussian(
     else:
         return jax.random.normal(key, shape=shape, dtype=dtype) * scale + loc
 
+
+def sample_student_t(
+        key: jax.random.PRNGKey,
+        loc: Array,
+        scale: Array,
+        df: float,
+        shape: tuple[int, ...],
+        dtype: Any = jnp.float32
+        ) -> Array:
+    """Sample from Student-t distribution with location and scale."""
+    adjusted_scale = scale * jnp.sqrt((df - 2) / df)  # Adjust scale for variance
+    return jax.random.t(key, df, shape=shape, dtype=dtype) * adjusted_scale + loc
+
+
+def sample_distrib(
+        key: jax.random.PRNGKey,
+        loc: Array,
+        scale: Array,
+        clip: float | None,
+        distrib_name: str,
+        distrib_param: float | None,
+        shape: tuple[int, ...],
+        dtype: Any = jnp.float32
+        ) -> Array:
+    """Dispatch to appropriate sampling function based on distribution name."""
+    if distrib_name == "normal":
+        return sample_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
+    elif distrib_name == "student":
+        if clip is not None:
+            raise NotImplementedError("Student-t distribution with clipping not implemented")
+        if distrib_param is None:
+            raise ValueError("distrib_param (degrees of freedom) must be specified for student-t distribution")
+        return sample_student_t(key, loc, scale, distrib_param, shape, dtype)
+    else:
+        raise ValueError(f"Unknown distribution name: {distrib_name}")
+
 #@partial(jax.jit, static_argnames=("clip",))
 def task_log_weights(
         tasks: Array,
         loc: float,
         scale: float,
         clip: float | None,
+        distrib_name: str,
+        distrib_param: float | None,
         use_weights: bool = False,
         reduce_axis: int = -1
         ) -> Array:
     if not use_weights:
         return jnp.zeros_like(tasks).sum(axis=reduce_axis)
-    if clip is None:
-        log_weights = jax.scipy.stats.norm.logpdf(tasks, loc=loc, scale=scale)
+    
+    if distrib_name == "normal":
+        if clip is None:
+            log_weights = jax.scipy.stats.norm.logpdf(tasks, loc=loc, scale=scale)
+        else:
+            log_weights = jax.scipy.stats.truncnorm.logpdf(tasks, -clip, clip, loc=loc, scale=scale)
+    elif distrib_name == "student":
+        if clip is not None:
+            raise NotImplementedError("Student-t distribution with clipping not implemented")
+        if distrib_param is None:
+            raise ValueError("distrib_param (degrees of freedom) must be specified for student-t distribution")
+        # Student-t logpdf: loc and scale parameters
+        assert distrib_param > 2, "Degrees of freedom must be greater than 2 for Student-t distribution"
+        # Match the scale so that variance stays constant as distrib_param changes
+        adjusted_scale = scale * jnp.sqrt((distrib_param - 2) / distrib_param)
+        standardized = (tasks - loc) / adjusted_scale
+        log_weights = jax.scipy.stats.t.logpdf(standardized, df=distrib_param) - jnp.log(adjusted_scale)
     else:
-        log_weights = jax.scipy.stats.truncnorm.logpdf(tasks, -clip, clip, loc=loc, scale=scale)
+        raise ValueError(f"Unknown distribution name: {distrib_name}")
+    
     return - jnp.sum(log_weights, axis=reduce_axis)  # IMPORTANT: minus
 
 def task_weights_trunc_norm_factor(
@@ -143,8 +223,14 @@ class NoisyLinearRegression:
     name: str | None = None  # Optional, can be set to override default name
     eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
     use_weights: bool = False  # Optional, whether to use task importance weights
+    distrib_name: str = "normal"  # Distribution name: "normal" or "student"
+    distrib_param: float | None = None  # Distribution parameter (degrees of freedom for student-t)
 
     def __post_init__(self):
+        # Validation
+        if self.distrib_name == "student" and self.clip is not None:
+            raise NotImplementedError("Student-t distribution with clipping not implemented")
+            
         self.data_key = jax.random.PRNGKey(self.data_seed)
         self.task_key = jax.random.PRNGKey(self.task_seed)
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
@@ -167,8 +253,10 @@ class NoisyLinearRegression:
     def generate_task_pool(self) -> Array:
         key = jax.random.fold_in(self.task_key, 0)
         shape = self.n_tasks, self.n_dims, 1
-        tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
-        log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
+        tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
+                              self.distrib_name, self.distrib_param, shape, self.dtype)
+        log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                     self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
         return tasks, weights
@@ -198,12 +286,15 @@ class NoisyLinearRegression:
             # jax.debug.print("Sampled indices for tasks: {}", idxs)
             tasks = self.task_pool[idxs]
             # log_weights = self.weights[idxs] 
-            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
             weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.n_dims, 1
-            tasks = sample_multivariate_gaussian(key, self.task_center, self.task_scale, self.clip, shape, self.dtype)
-            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, self.use_weights, reduce_axis=1)
+            tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
+                                 self.distrib_name, self.distrib_param, shape, self.dtype)
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
             weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         chex.assert_shape(tasks, (self.batch_size, self.n_dims, 1))
         chex.assert_shape(weights, (self.batch_size, 1))
@@ -320,6 +411,7 @@ class NoisyLinearRegression:
             self.noise_scale,
             self.task_center,
             self.clip,
+            self.distrib_param,
         )
         
         # Static values (configuration that doesn't change during execution)
@@ -337,6 +429,7 @@ class NoisyLinearRegression:
             'name': self.name,
             'eval_ridge': self.eval_ridge,
             'use_weights': self.use_weights,
+            'distrib_name': self.distrib_name,
         }
         
         return (children, aux_data)
@@ -344,11 +437,11 @@ class NoisyLinearRegression:
     @classmethod
     def _tree_unflatten(cls, aux_data, children):
         (data_key, task_key, noise_key, task_pool, weights, data_pool,
-         data_scale, task_scale, noise_scale, task_center, clip) = children
+         data_scale, task_scale, noise_scale, task_center, clip, distrib_param) = children
         
         # Create object with aux_data parameters and placeholder scale values
         obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
-                 task_center=0.0, clip=None, **aux_data)
+                 task_center=0.0, clip=None, distrib_param=None, **aux_data)
         
         # Set the dynamic values
         obj.data_key = data_key
@@ -362,6 +455,7 @@ class NoisyLinearRegression:
         obj.noise_scale = noise_scale
         obj.task_center = task_center
         obj.clip = clip
+        obj.distrib_param = distrib_param
         
         return obj
 

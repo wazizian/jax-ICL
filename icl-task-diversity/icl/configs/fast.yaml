@@ -15,8 +15,10 @@ task:
   data_scale: 1.0
   task_scale: 1.0
   noise_scale: 0.5
-  clip: 2.0
-  use_weights: true
+  clip: null
+  use_weights: false
+  distrib_name: student
+  distrib_param: 2
 
 model:
   name: transformer

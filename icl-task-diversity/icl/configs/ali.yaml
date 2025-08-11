@@ -18,6 +18,8 @@ task:
   clip: 10.0
   use_weights: false
   eval_ridge: false
+  distrib_name: normal
+  distrib_param: null
 
 model:
   name: transformer

@@ -15,6 +15,8 @@ task:
   data_scale: 1.0
   task_scale: 1.0
   noise_scale: 0.
+  distrib_name: normal
+  distrib_param: null
 
 model:
   name: transformer
