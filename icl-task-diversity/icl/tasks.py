@@ -21,14 +21,16 @@ def get_task_name(task: "Task") -> str:
     return task.name 
 
 @partial(jax.jit, static_argnames=("shape", "dtype"))
-def sample_truncated_normal(
+def sample_truncated_student(
         key: jax.random.PRNGKey,
         loc: Array,
         scale: Array,
+        df: float,
         clip: float,
         shape: tuple[int, ...],
         dtype: Any = jnp.float32
         ) -> Array:
+    adjusted_scale = scale * jnp.sqrt((df - 2) / df)  # Adjust scale for variance
     def cond_fun(val):
         _, x = val
         return jnp.any(jnp.abs(x) > clip)
@@ -36,12 +38,12 @@ def sample_truncated_normal(
     def body_fun(val):
         key, x = val
         key, subkey = jax.random.split(key)
-        new_sample = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
+        new_sample = jax.random.t(key, df, shape=shape, dtype=dtype) * adjusted_scale + loc
         new_x = jax.lax.select(jnp.abs(x) > clip, new_sample, x)
         return key, new_x
 
     key, subkey = jax.random.split(key)
-    init_x = jax.random.normal(subkey, shape=shape, dtype=dtype) * scale + loc
+    init_x = jax.random.t(subkey, df, shape=shape, dtype=dtype) * adjusted_scale + loc
     init_val = (key, init_x)
     _, final_x = jax.lax.while_loop(cond_fun, body_fun, init_val)
     return final_x
@@ -90,14 +92,19 @@ def sample_distrib(
         dtype: Any = jnp.float32
         ) -> Array:
     """Dispatch to appropriate sampling function based on distribution name."""
-    if distrib_name == "normal":
+    if distrib_name == "normal" or (distrib_name == "student" and distrib_param == float("inf")):
+        # jax.debug.print("Sampling from normal distribution with loc {}, scale {}, clip {}", loc, scale, clip)
         return sample_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
     elif distrib_name == "student":
+        # jax.debug.print("Sampling from student-t distribution with loc {}, scale {}, df {}, clip {}", loc, scale, distrib_param, clip)
         if clip is not None:
             raise NotImplementedError("Student-t distribution with clipping not implemented")
         if distrib_param is None:
             raise ValueError("distrib_param (degrees of freedom) must be specified for student-t distribution")
-        return sample_student_t(key, loc, scale, distrib_param, shape, dtype)
+        if clip is None:
+            return sample_student_t(key, loc, scale, distrib_param, shape, dtype)
+        else:
+            return sample_truncated_student(key, loc, scale, distrib_param, clip, shape, dtype)
     else:
         raise ValueError(f"Unknown distribution name: {distrib_name}")
 
@@ -115,7 +122,7 @@ def task_log_weights(
     if not use_weights:
         return jnp.zeros_like(tasks).sum(axis=reduce_axis)
     
-    if distrib_name == "normal":
+    if distrib_name == "normal" or (distrib_name == "student" and distrib_param == float("inf")):
         if clip is None:
             log_weights = jax.scipy.stats.norm.logpdf(tasks, loc=loc, scale=scale)
         else:
@@ -411,7 +418,6 @@ class NoisyLinearRegression:
             self.noise_scale,
             self.task_center,
             self.clip,
-            self.distrib_param,
         )
         
         # Static values (configuration that doesn't change during execution)
@@ -430,6 +436,7 @@ class NoisyLinearRegression:
             'eval_ridge': self.eval_ridge,
             'use_weights': self.use_weights,
             'distrib_name': self.distrib_name,
+            'distrib_param': self.distrib_param,
         }
         
         return (children, aux_data)
@@ -437,11 +444,11 @@ class NoisyLinearRegression:
     @classmethod
     def _tree_unflatten(cls, aux_data, children):
         (data_key, task_key, noise_key, task_pool, weights, data_pool,
-         data_scale, task_scale, noise_scale, task_center, clip, distrib_param) = children
+         data_scale, task_scale, noise_scale, task_center, clip) = children
         
         # Create object with aux_data parameters and placeholder scale values
         obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
-                 task_center=0.0, clip=None, distrib_param=None, **aux_data)
+                 task_center=0.0, clip=None, **aux_data)
         
         # Set the dynamic values
         obj.data_key = data_key
@@ -455,7 +462,6 @@ class NoisyLinearRegression:
         obj.noise_scale = noise_scale
         obj.task_center = task_center
         obj.clip = clip
-        obj.distrib_param = distrib_param
         
         return obj
 

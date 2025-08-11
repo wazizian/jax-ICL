@@ -18,8 +18,8 @@ task:
   clip: null
   use_weights: false
   eval_ridge: false
-  distrib_name: normal
-  distrib_param: null
+  distrib_name: student
+  distrib_param: .inf
 
 model:
   name: transformer
@@ -33,7 +33,7 @@ model:
 
 training:
   optimizer: adam
-  lr: 1.0e-2
+  lr: 1.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 5_000
   total_steps: 80_000
@@ -58,8 +58,12 @@ eval:
 
 # Hydra settings
 hydra:
+  mode: MULTIRUN
   run:
     dir: ${output_dir}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
     dir: ${output_dir}/multirun/${now:%Y-%m-%d_%H-%M-%S}
     subdir: ${hydra.job.num}
+  sweeper:
+    params:
+      task.distrib_param: inf, 3.0, 5.0, 10.0

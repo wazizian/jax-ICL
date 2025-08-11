@@ -18,7 +18,7 @@ task:
   clip: null
   use_weights: false
   distrib_name: student
-  distrib_param: 2
+  distrib_param: .inf
 
 model:
   name: transformer
