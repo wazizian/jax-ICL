@@ -115,7 +115,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
                 axes[2].plot(eval_steps, mean_values, 
                         color=colors[color_idx_mse % len(colors)], 
                         linewidth=2,
-                        label=f"{task_name}: {metric_name}")
+                        label=f"{format_task_name_for_display(task_name)}: {metric_name}")
                 color_idx_mse += 1
             elif "Transformer |" in metric_name and "(RelErr)" in metric_name:
                 # Relative error metrics
@@ -123,7 +123,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
                 axes[3].plot(eval_steps, mean_values, 
                         color=colors[color_idx_rel % len(colors)], 
                         linewidth=2,
-                        label=f"{task_name}: {metric_name}")
+                        label=f"{format_task_name_for_display(task_name)}: {metric_name}")
                 color_idx_rel += 1
     
     # Configure MSE plot (axes[2])
@@ -154,6 +154,13 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
     plt.show()
 
 
+def format_task_name_for_display(task_name):
+    """Format task name for display in legends, replacing 'Fixed task' with 'Shifted task'."""
+    if task_name.startswith("Fixed task"):
+        return task_name.replace("Fixed task", "Shifted task")
+    return task_name
+
+
 def icl_power_law(k, D, alpha, C):
     """Power law function: D/(k+1)^alpha + C"""
     # return D / ((k + 1) ** alpha) + C
@@ -161,12 +168,12 @@ def icl_power_law(k, D, alpha, C):
 
 
 def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
-    """Extract minimum MSE over context length and time to reach minimum MSE for all tasks.
+    """Extract minimum MSE over context length and mean MSE over context length for last iteration for all tasks.
     
     Returns:
-        tuple: (min_mse_dict, time_to_min_dict) where:
+        tuple: (min_mse_dict, mean_mse_dict) where:
             min_mse_dict: {task_name: min_mse}
-            time_to_min_dict: {task_name: time_to_min_mse}
+            mean_mse_dict: {task_name: mean_mse_over_context}
     """
     eval_steps = log.get("eval/step", [])
     if not eval_steps:
@@ -184,29 +191,34 @@ def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
                 eval_metrics[task_name][metric_name] = metric_values
     
     min_mse_results = {}
-    time_to_min_results = {}
+    mean_mse_results = {}
     
     for task_name, metrics in eval_metrics.items():
         if "Fixed task" not in task_name:
             continue
         for metric_name, values in metrics.items():
             if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
-                # Find the step with minimum MSE across all context lengths and time steps
+                # Find the minimum MSE across all context lengths and time steps
                 min_global_mse = float('inf')
-                time_to_min = float('inf') 
                 
                 for step_idx, step_mse_values in enumerate(values):
                     if step_mse_values:
                         step_min_mse = min(step_mse_values)
                         if step_min_mse < min_global_mse:
                             min_global_mse = step_min_mse
-                            time_to_min = step_mse_values.index(min_global_mse)  # Get the index of the minimum MSE in this step
                 
-                time_to_min_results[task_name] = time_to_min
+                # Get mean MSE over context length for the last iteration
+                final_step_mse_values = values[final_step_idx]
+                if final_step_mse_values:
+                    mean_mse_over_context = np.mean(final_step_mse_values)
+                else:
+                    mean_mse_over_context = float('inf')
+                
+                mean_mse_results[task_name] = mean_mse_over_context
                 min_mse_results[task_name] = min_global_mse
                 break  # Only take the first valid metric per task
     
-    return min_mse_results, time_to_min_results
+    return min_mse_results, mean_mse_results
 
 
 def extract_power_law_params(log: dict) -> dict:
@@ -409,7 +421,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                             linewidth=2,
                             marker='o',
                             markersize=6,
-                            label=f"{task_name}")
+                            label=f"{format_task_name_for_display(task_name)}")
                     color_idx += 1
         
         plt.xlabel("Context Length (Position)")
@@ -442,7 +454,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                             linewidth=2,
                             marker='o',
                             markersize=6,
-                            label=f"{task_name}")
+                            label=f"{format_task_name_for_display(task_name)}")
                     color_idx += 1
         
         plt.xlabel("Context Length (Position)")
@@ -498,7 +510,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
             subdirs.sort(key=lambda x: int(x.name))
             
             # Process each subrun as a separate run
-            for subdir in subdirs:
+            for subdir_idx, subdir in enumerate(subdirs):
                 # Load config and log for this subrun
                 config_path = subdir / "config.json"
                 log_path = subdir / "log.json"
@@ -518,7 +530,11 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
                 power_law_params = extract_power_law_params(log)
                 
                 # Create run data for this subrun
-                subrun_label = f"{run_label}-{subdir.name}"
+                if run_labels and subdir_idx < len(run_labels):
+                    # Use custom name for this subrun
+                    subrun_label = run_labels[subdir_idx].strip()
+                else:
+                    subrun_label = f"{run_label}-{subdir.name}"
                 run_data = []
                 
                 # Add Test tasks (task center = 0)
@@ -647,7 +663,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
 
 
 def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
-    """Plot minimum MSE vs task shift and time to reach minimum MSE for multiple runs.
+    """Plot minimum MSE vs task shift and mean MSE over context length for last iteration for multiple runs.
     
     Args:
         run_paths: List of Path objects pointing to runs or multirun subdirs
@@ -658,9 +674,9 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         print("No run paths provided for minimum MSE analysis")
         return
     
-    # Collect minimum MSE and time-to-minimum data from all runs
+    # Collect minimum MSE and mean MSE over context length data from all runs
     min_mse_data = {}  # {run_label: [(task_center, min_mse, task_name), ...]}
-    time_to_min_data = {}  # {run_label: [(task_center, time_to_min, task_name), ...]}
+    mean_mse_data = {}  # {run_label: [(task_center, mean_mse, task_name), ...]}
     
     for i, run_path in enumerate(run_paths):
         run_path = Path(run_path)
@@ -683,7 +699,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             subdirs.sort(key=lambda x: int(x.name))
             
             # Process each subrun as a separate run
-            for subdir in subdirs:
+            for subdir_idx, subdir in enumerate(subdirs):
                 # Load config and log for this subrun
                 config_path = subdir / "config.json"
                 log_path = subdir / "log.json"
@@ -699,33 +715,37 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 # Extract task centers from config
                 task_centers = config.get('eval', {}).get('task_centers', [])
                 
-                # Extract minimum MSE and time-to-minimum for all tasks
-                min_mse_params, time_to_min_params = extract_min_mse_params(log)
+                # Extract minimum MSE and mean MSE over context length for all tasks
+                min_mse_params, mean_mse_params = extract_min_mse_params(log)
                 
                 # Create run data for this subrun
-                subrun_label = f"{run_label}-{subdir.name}"
+                if run_labels and subdir_idx < len(run_labels):
+                    # Use custom name for this subrun
+                    subrun_label = run_labels[subdir_idx].strip()
+                else:
+                    subrun_label = f"{run_label}-{subdir.name}"
                 min_mse_run_data = []
-                time_to_min_run_data = []
+                mean_mse_run_data = []
                 
                 # Add Test tasks (task center = 0)
                 if "Test tasks" in min_mse_params:
                     min_mse = min_mse_params["Test tasks"]
-                    time_to_min = time_to_min_params.get("Test tasks", 0)
+                    mean_mse = mean_mse_params.get("Test tasks", 0)
                     min_mse_run_data.append((0.0, min_mse, "Test tasks"))
-                    time_to_min_run_data.append((0.0, time_to_min, "Test tasks"))
+                    mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
                 
                 # Add Fixed tasks
                 for task_center in task_centers:
                     task_name = f"Fixed task {task_center}"
                     if task_name in min_mse_params:
                         min_mse = min_mse_params[task_name]
-                        time_to_min = time_to_min_params.get(task_name, 0)
+                        mean_mse = mean_mse_params.get(task_name, 0)
                         min_mse_run_data.append((task_center, min_mse, task_name))
-                        time_to_min_run_data.append((task_center, time_to_min, task_name))
+                        mean_mse_run_data.append((task_center, mean_mse, task_name))
                 
                 if min_mse_run_data:
                     min_mse_data[subrun_label] = min_mse_run_data
-                    time_to_min_data[subrun_label] = time_to_min_run_data
+                    mean_mse_data[subrun_label] = mean_mse_run_data
         
         elif (run_path / "log.json").exists():
             # This is a single run
@@ -743,31 +763,31 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             # Extract task centers from config
             task_centers = config.get('eval', {}).get('task_centers', [])
             
-            # Extract minimum MSE and time-to-minimum for all tasks
-            min_mse_params, time_to_min_params = extract_min_mse_params(log)
+            # Extract minimum MSE and mean MSE over context length for all tasks
+            min_mse_params, mean_mse_params = extract_min_mse_params(log)
             
             min_mse_run_data = []
-            time_to_min_run_data = []
+            mean_mse_run_data = []
             
             # Add Test tasks (task center = 0)
             if "Test tasks" in min_mse_params:
                 min_mse = min_mse_params["Test tasks"]
-                time_to_min = time_to_min_params.get("Test tasks", 0)
+                mean_mse = mean_mse_params.get("Test tasks", 0)
                 min_mse_run_data.append((0.0, min_mse, "Test tasks"))
-                time_to_min_run_data.append((0.0, time_to_min, "Test tasks"))
+                mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
             
             # Add Fixed tasks
             for task_center in task_centers:
                 task_name = f"Fixed task {task_center}"
                 if task_name in min_mse_params:
                     min_mse = min_mse_params[task_name]
-                    time_to_min = time_to_min_params.get(task_name, 0)
+                    mean_mse = mean_mse_params.get(task_name, 0)
                     min_mse_run_data.append((task_center, min_mse, task_name))
-                    time_to_min_run_data.append((task_center, time_to_min, task_name))
+                    mean_mse_run_data.append((task_center, mean_mse, task_name))
             
             if min_mse_run_data:
                 min_mse_data[run_label] = min_mse_run_data
-                time_to_min_data[run_label] = time_to_min_run_data
+                mean_mse_data[run_label] = mean_mse_run_data
         
         else:
             print(f"Warning: {run_path} is neither a valid run nor multirun directory")
@@ -807,8 +827,8 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     ax1.set_yscale('log')
     ax1.legend()
     
-    # Plot time to minimum MSE data (right subplot)
-    for i, (run_label, run_data) in enumerate(time_to_min_data.items()):
+    # Plot mean MSE over context length data (right subplot)
+    for i, (run_label, run_data) in enumerate(mean_mse_data.items()):
         if not run_data:
             continue
         
@@ -816,19 +836,20 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         run_data.sort(key=lambda x: x[0])
         
         task_centers = [x[0] for x in run_data if x[0] <= max_shift]
-        times_to_min = [x[1] for x in run_data if x[0] <= max_shift]
+        mean_mses = [x[1] for x in run_data if x[0] <= max_shift]
         
         color = colors[i % len(colors)]
         
-        # Plot time to minimum MSE vs task center
-        ax2.plot(task_centers, times_to_min, 'o-', color=color, linewidth=2, 
+        # Plot mean MSE over context length vs task center
+        ax2.plot(task_centers, mean_mses, 'o-', color=color, linewidth=2, 
                 markersize=6, label=run_label)
     
-    # Configure time to minimum MSE plot
+    # Configure mean MSE over context length plot
     ax2.set_xlabel("Task Center (Task Shift)")
-    ax2.set_ylabel("Context Needed for Minimum MSE (Context Length)")
-    ax2.set_title("Context Needed for Minimum MSE vs Task Shift")
+    ax2.set_ylabel("Mean MSE over Context Length (Last Iteration)")
+    ax2.set_title("Mean MSE over Context Length vs Task Shift")
     ax2.grid(True, alpha=0.3)
+    ax2.set_yscale('log')
     ax2.legend()
     
     plt.tight_layout()
@@ -852,16 +873,21 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         if not run_data:
             continue
         print(f"\n{run_label}:")
-        time_data = time_to_min_data.get(run_label, [])
-        time_dict = {x[2]: x[1] for x in time_data}  # task_name -> time_to_min
+        mean_data = mean_mse_data.get(run_label, [])
+        mean_dict = {x[2]: x[1] for x in mean_data}  # task_name -> mean_mse
         
         for task_center, min_mse, task_name in sorted(run_data, key=lambda x: x[0]):
-            time_to_min = time_dict.get(task_name, "N/A")
-            print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, time_to_min={time_to_min}")
+            mean_mse = mean_dict.get(task_name, "N/A")
+            print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, mean_mse_last_iter={mean_mse:.6f}")
 
 
-def analyze_multirun(multirun_id: str):
-    """Analyze all runs within a multirun experiment."""
+def analyze_multirun(multirun_id: str, custom_names: list = None):
+    """Analyze all runs within a multirun experiment.
+    
+    Args:
+        multirun_id: The multirun ID to analyze
+        custom_names: Optional list of custom names for each run
+    """
     multirun_dir = Path("outputs/multirun") / multirun_id
     
     if not multirun_dir.exists():
@@ -882,8 +908,10 @@ def analyze_multirun(multirun_id: str):
     print(f"\n=== Analyzing Multirun: {multirun_id} ===")
     print(f"Found {len(run_subdirs)} completed runs: {', '.join(run_subdirs)}")
     
-    for subdir_name in run_subdirs:
-        print(f"\n--- Analyzing run {subdir_name} ---")
+    for i, subdir_name in enumerate(run_subdirs):
+        # Use custom name if provided, otherwise use subdir_name
+        display_name = custom_names[i] if custom_names and i < len(custom_names) else subdir_name
+        print(f"\n--- Analyzing run {subdir_name} ({display_name}) ---")
         
         # Load log for this run
         log_path = multirun_dir / subdir_name / "log.json"
@@ -891,7 +919,7 @@ def analyze_multirun(multirun_id: str):
             log = json.load(f)
         
         # Create run identifier for display
-        run_display_id = f"{multirun_id}/{subdir_name}"
+        run_display_id = f"{multirun_id}/{display_name}"
         
         # Run all analysis functions for this individual run
         print_summary(log, run_display_id)
@@ -906,6 +934,27 @@ def analyze_multirun(multirun_id: str):
 
 
 
+def parse_multirun_args(multirun_arg, run_id_arg):
+    """Parse multirun arguments to extract custom names and multirun ID.
+    
+    Args:
+        multirun_arg: The --multirun argument value (True, string with names, or None)
+        run_id_arg: The run_id positional argument
+    
+    Returns:
+        tuple: (multirun_id, custom_names_list) where custom_names_list is None if no custom names
+    """
+    if multirun_arg is True:
+        # Just --multirun flag, no custom names
+        return run_id_arg, None
+    elif isinstance(multirun_arg, str):
+        # Custom names provided, run_id should be the multirun_id
+        custom_names = [name.strip() for name in multirun_arg.split(',')]
+        return run_id_arg, custom_names
+    else:
+        return None, None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze training logs and plot metrics",
@@ -916,6 +965,7 @@ Examples:
   python analyze.py 2025-08-06_12-24-25   # Analyze specific run
   python analyze.py --multirun         # Analyze most recent multirun
   python analyze.py --multirun 2025-08-11_11-45-46   # Analyze specific multirun
+  python analyze.py --multirun "GPT-2,Transformer,LSTM" 2025-08-11_11-45-46   # Custom names
   python analyze.py --multirun --shift-analysis 2025-08-11_11-45-46   # Task shift analysis
         """
     )
@@ -926,8 +976,9 @@ Examples:
     )
     parser.add_argument(
         '--multirun',
-        action='store_true',
-        help='Analyze a multirun experiment instead of a single run'
+        nargs='?',
+        const=True,
+        help='Analyze a multirun experiment instead of a single run. Optionally provide comma-separated names for runs (e.g., "name0,name1,name2")'
     )
     parser.add_argument(
         '--shift-analysis',
@@ -941,8 +992,10 @@ Examples:
         # Handle distribution shift analysis
         if args.multirun:
             # Distribution analysis for multirun(s)
-            if args.run_id:
-                multirun_ids = [args.run_id]
+            multirun_id, custom_names = parse_multirun_args(args.multirun, args.run_id)
+            
+            if multirun_id:
+                multirun_ids = [multirun_id]
             else:
                 try:
                     multirun_ids = [get_most_recent_multirun()]
@@ -970,16 +1023,18 @@ Examples:
         
         # Perform task shift analysis
         try:
-            plot_task_shift_analysis(run_paths)
-            plot_min_mse_analysis(run_paths)
+            plot_task_shift_analysis(run_paths, run_labels=custom_names)
+            plot_min_mse_analysis(run_paths, run_labels=custom_names)
         except Exception as e:
             print(f"Error in task shift analysis: {e}")
             return 1
             
     elif args.multirun:
         # Handle multirun analysis
-        if args.run_id:
-            multirun_id = args.run_id
+        multirun_id, custom_names = parse_multirun_args(args.multirun, args.run_id)
+        
+        if multirun_id:
+            pass  # Use provided multirun_id
         else:
             try:
                 multirun_id = get_most_recent_multirun()
@@ -990,7 +1045,7 @@ Examples:
         
         # Analyze the multirun
         try:
-            analyze_multirun(multirun_id)
+            analyze_multirun(multirun_id, custom_names)
         except FileNotFoundError as e:
             print(f"Error: {e}")
             return 1
