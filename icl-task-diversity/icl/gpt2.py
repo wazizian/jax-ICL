@@ -2,6 +2,7 @@
 """
 from typing import Any
 
+import chex
 import flax.linen as nn
 import jax.numpy as jnp
 from flax import struct
@@ -59,7 +60,8 @@ class GPT2SelfAttention(nn.Module):
         return y
 
 
-class GPT2LinearSelfAttention(nn.Module):
+class GPT2LinearSelfAttentionOld(nn.Module):
+    """Original linear attention implementation - preserved for reference"""
     config: GPT2Config
 
     def setup(self):
@@ -110,6 +112,105 @@ class GPT2LinearSelfAttention(nn.Module):
         y = self.attn_dropout(y, deterministic=not training)
         y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
         y = self.resid_droput(self.c_proj(y), deterministic=not training)
+        return y
+
+
+class GPT2LinearSelfAttention(nn.Module):
+    """Corrected linear attention implementation with chex assertions"""
+    config: GPT2Config
+
+    def setup(self):
+        self.c_attn = nn.Dense(3 * self.config.n_embd, self.config.bias, self.config.dtype, kernel_init=init_fn)
+        self.c_proj = nn.Dense(
+            self.config.n_embd, self.config.bias, self.config.dtype, kernel_init=get_scaled_init_fn(self.config.n_layer)
+        )
+        self.attn_dropout = nn.Dropout(self.config.dropout)
+        self.resid_droput = nn.Dropout(self.config.dropout)
+
+    def __call__(self, x: Array, attention_mask: Array, training: bool = False) -> Array:
+        B, T, C = x.shape  # batch_size, block_size, n_embd
+        chex.assert_shape(x, (B, T, C))
+        chex.assert_shape(attention_mask, (B, T, T))
+        
+        # Compute Q, K, V
+        qkv = self.c_attn(x)
+        chex.assert_shape(qkv, (B, T, 3 * C))
+        
+        q, k, v = jnp.split(qkv, 3, axis=2)
+        chex.assert_shape(q, (B, T, C))
+        chex.assert_shape(k, (B, T, C))
+        chex.assert_shape(v, (B, T, C))
+        
+        # Reshape for multi-head attention
+        head_dim = C // self.config.n_head
+        q = q.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        k = k.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        v = v.reshape(B, T, self.config.n_head, head_dim).transpose(0, 2, 1, 3)  # (B, nh, T, hs)
+        chex.assert_shape(q, (B, self.config.n_head, T, head_dim))
+        chex.assert_shape(k, (B, self.config.n_head, T, head_dim))
+        chex.assert_shape(v, (B, self.config.n_head, T, head_dim))
+        
+        # ELU feature maps: φ(x) = ELU(x) + 1
+        phi_q = nn.elu(q) + 1.0  # (B, nh, T, hs)
+        phi_k = nn.elu(k) + 1.0  # (B, nh, T, hs)
+        chex.assert_shape(phi_q, (B, self.config.n_head, T, head_dim))
+        chex.assert_shape(phi_k, (B, self.config.n_head, T, head_dim))
+        
+        # Apply attention mask (padding) by zeroing out invalid positions
+        # attention_mask shape: (B, T, T)
+        # Extract valid positions from attention mask - position i is valid if attention_mask[i, i] > 0
+        valid_positions = jnp.diagonal(attention_mask, axis1=1, axis2=2)  # (B, T)
+        chex.assert_shape(valid_positions, (B, T))
+        
+        position_mask = valid_positions[:, None, :, None]  # (B, 1, T, 1)
+        chex.assert_shape(position_mask, (B, 1, T, 1))
+        
+        # Mask the features and values at invalid positions
+        phi_k = phi_k * position_mask
+        v = v * position_mask
+        chex.assert_shape(phi_k, (B, self.config.n_head, T, head_dim))
+        chex.assert_shape(v, (B, self.config.n_head, T, head_dim))
+        
+        # Causal linear attention using cumulative sums
+        # For each position t, we want: sum_{s=1}^t φ(k_s) ⊗ v_s / sum_{s=1}^t φ(k_s)
+        
+        # Cumulative sum for numerator: φ(K)^T @ V up to position t
+        # phi_k: (B, nh, T, hs), v: (B, nh, T, hs)
+        kv_outer = jnp.einsum('bhti,bhtj->bhtij', phi_k, v)  # (B, nh, T, hs, hs)
+        chex.assert_shape(kv_outer, (B, self.config.n_head, T, head_dim, head_dim))
+        
+        kv_cumsum = jnp.cumsum(kv_outer, axis=2)  # (B, nh, T, hs, hs)
+        chex.assert_shape(kv_cumsum, (B, self.config.n_head, T, head_dim, head_dim))
+        
+        # Cumulative sum for denominator: φ(K)^T @ 1 up to position t  
+        k_cumsum = jnp.cumsum(phi_k, axis=2)  # (B, nh, T, hs)
+        chex.assert_shape(k_cumsum, (B, self.config.n_head, T, head_dim))
+        
+        # Compute output: φ(Q) @ cumsum(φ(K)^T @ V) / (φ(Q) @ cumsum(φ(K)^T @ 1))
+        # phi_q: (B, nh, T, hs), kv_cumsum: (B, nh, T, hs, hs)
+        numerator = jnp.einsum('bhti,bhtij->bhtj', phi_q, kv_cumsum)  # (B, nh, T, hs)
+        chex.assert_shape(numerator, (B, self.config.n_head, T, head_dim))
+        
+        # phi_q: (B, nh, T, hs), k_cumsum: (B, nh, T, hs)  
+        denominator = jnp.einsum('bhti,bhti->bht', phi_q, k_cumsum)  # (B, nh, T)
+        chex.assert_shape(denominator, (B, self.config.n_head, T))
+        
+        # Avoid division by zero
+        denominator = jnp.maximum(denominator, 1e-8)
+        chex.assert_shape(denominator, (B, self.config.n_head, T))
+        
+        y = numerator / denominator[..., None]  # (B, nh, T, hs)
+        chex.assert_shape(y, (B, self.config.n_head, T, head_dim))
+        
+        y = self.attn_dropout(y, deterministic=not training)
+        chex.assert_shape(y, (B, self.config.n_head, T, head_dim))
+        
+        y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
+        chex.assert_shape(y, (B, T, C))
+        
+        y = self.resid_droput(self.c_proj(y), deterministic=not training)
+        chex.assert_shape(y, (B, T, C))
+        
         return y
 
 

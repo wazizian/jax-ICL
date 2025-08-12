@@ -26,14 +26,14 @@ model:
   n_head: 2
   seed: 100
   use_ln: true
-  use_linear_attention: false
+  use_linear_attention: true
 
 training:
   optimizer: adamw
   lr: 1.0e-2
   schedule: warmup_cosine_decay
-  warmup_steps: 200
-  total_steps: 500
+  warmup_steps: 50
+  total_steps: 200
   weight_decay: 0.01
 
 eval:

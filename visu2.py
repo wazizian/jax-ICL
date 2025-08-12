@@ -5,7 +5,7 @@ from functools import partial
 
 # Problem setup
 d = 8
-C = 40.0 * 2 * 0.1
+C = 128.0 * 2 * 0.1
 nus = [3.0, 5.0, 10.0, jnp.inf]
 x_grid = jnp.linspace(0.0, 4.0, 500)
 n_samples = 200_000
@@ -176,17 +176,16 @@ for nu in nus:
 plt.figure(figsize=(12, 8))
 for nu in nus:
     label = "Normal (ν=∞)" if jnp.isinf(nu) else f"ν={int(nu)}"
-    plt.plot(x_grid, results[nu], label=label, linewidth=1.8)
-#plt.xlabel("x")
-#plt.ylabel(r"$-\log \,\mathbb{E}_p[\exp(-C\|\theta-\theta^*\|^2)]$")
+    plt.plot(x_grid, results[nu], label=label, linewidth=2)
+
 plt.xlabel("Task shift")
 plt.ylabel("Theory bound on ICL error")
-#plt.title(fr"IS with proposal $q_x=N(\theta^*=x \times 1, I)$; d={d}, C={C}")
-plt.title("Theory bound for ICL error as  a function of task shift")
+plt.title("Theory bound for ICL error as a function of task shift")
 plt.yscale('log')
-plt.legend()
+plt.grid(True, alpha=0.3)
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.tight_layout()
-plt.savefig("visu2.png", dpi=300)
+plt.savefig("visu2.png", dpi=150, bbox_inches='tight')
 plt.show()
 
 
@@ -205,16 +204,14 @@ for nu in nus:
         all_y_vals = neg_log_mgf_IS_for_nu_vmaped(float(nu), False, C_grid, x_small_grid)
     all_y_vals = all_y_vals / C_grid[:, None]  # normalize by C
     for i, x in enumerate(x_small_grid):
-        plt.plot(C_grid.flatten(), all_y_vals[:, i], label=f"Shift={x:.1f}", linewidth=1.8)
+        plt.plot(C_grid.flatten(), all_y_vals[:, i], label=f"Shift={x:.1f}", linewidth=2)
 
     title_str = "Normal (ν=∞)" if jnp.isinf(nu) else f"ν={int(nu)}"
-    # plt.title(fr"{title_str}, d={d}")
-    # plt.xlabel("C")
-    # plt.ylabel(r"$-\log \,\mathbb{E}[\exp(-n\|\theta-\theta^*\|^2)] / n$")
     plt.xlabel("Context length")
     plt.ylabel("Theory bound on ICL error")
     plt.title(fr"Theory bound for ICL error as a function of context length for {title_str}")
     plt.yscale('log')
-    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(f"visu2_nu_{int(nu) if not jnp.isinf(nu) else 'inf'}.png", dpi=300)
+    plt.savefig(f"visu2_nu_{int(nu) if not jnp.isinf(nu) else 'inf'}.png", dpi=150, bbox_inches='tight')
