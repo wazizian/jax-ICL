@@ -201,18 +201,21 @@ def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
                 # Find the minimum MSE across all context lengths and time steps
                 min_global_mse = float('inf')
                 
-                for step_idx, step_mse_values in enumerate(values):
-                    if step_mse_values:
-                        step_min_mse = min(step_mse_values)
-                        if step_min_mse < min_global_mse:
-                            min_global_mse = step_min_mse
+                # for step_idx, step_mse_values in enumerate(values):
+                #     if step_mse_values:
+                #         step_min_mse = min(step_mse_values)
+                #         if step_min_mse < min_global_mse:
+                #             min_global_mse = step_min_mse
                 
                 # Get mean MSE over context length for the last iteration
                 final_step_mse_values = values[final_step_idx]
                 if final_step_mse_values:
                     mean_mse_over_context = np.mean(final_step_mse_values)
+                    min_global_mse = min(final_step_mse_values)
                 else:
                     mean_mse_over_context = float('inf')
+                    min_global_mse = float('inf')
+
                 
                 mean_mse_results[task_name] = mean_mse_over_context
                 min_mse_results[task_name] = min_global_mse
@@ -821,8 +824,8 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     
     # Configure minimum MSE plot
     ax1.set_xlabel("Task Center (Task Shift)")
-    ax1.set_ylabel("Minimum MSE")
-    ax1.set_title("Minimum MSE vs Task Shift")
+    ax1.set_ylabel("Best MSE over Context Length (Last Iteration)")
+    ax1.set_title("Best MSE over Context Length vs Task Shift")
     ax1.grid(True, alpha=0.3)
     ax1.set_yscale('log')
     ax1.legend()

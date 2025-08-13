@@ -174,9 +174,15 @@ for nu in nus:
 
 # ---------- Plot ----------
 plt.figure(figsize=(12, 8))
+colors = {3.0: 'blue', 5.0: 'green', 10.0: 'orange', jnp.inf: 'red'}
 for nu in nus:
-    label = "Normal (ν=∞)" if jnp.isinf(nu) else f"ν={int(nu)}"
-    plt.plot(x_grid, results[nu], label=label, linewidth=2)
+    label = "Normal (ν=∞)" if jnp.isinf(nu) else f"Student ν={int(nu)}"
+    plt.plot(x_grid, results[nu], color=colors[nu], label=label, linewidth=2)
+    # Add markers at every 0.25
+    marker_indices = jnp.arange(0, len(x_grid), len(x_grid) // (int((x_grid[-1] - x_grid[0]) / 0.25) + 1))
+    marker_x = x_grid[marker_indices]
+    marker_y = results[nu][marker_indices]
+    plt.plot(marker_x, marker_y, 'o', color=colors[nu], markersize=4)
 
 plt.xlabel("Task shift")
 plt.ylabel("Theory bound on ICL error")
