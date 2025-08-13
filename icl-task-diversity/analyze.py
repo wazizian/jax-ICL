@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 from scipy.optimize import curve_fit
 
 
@@ -72,8 +73,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
     lr_values = log["train/lr"]
     train_losses = log.get("train/loss", [])
     
-    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
-    axes = axes.flatten()
+    fig, axes = plt.subplots(3, 1, figsize=(15, 18))
     
     # Plot training loss
     if train_losses:
@@ -83,14 +83,6 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
         axes[0].set_title(f"Training Loss - {run_id}")
         axes[0].grid(True, alpha=0.3)
         axes[0].set_yscale('log')
-    
-    # Plot learning rate
-    axes[1].plot(steps, lr_values, 'b-', linewidth=2)
-    axes[1].set_xlabel("Training Step")
-    axes[1].set_ylabel("Learning Rate")
-    axes[1].set_title(f"Learning Rate Schedule - {run_id}")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].set_yscale('log')
     
     # Plot evaluation metrics
     eval_metrics = {}
@@ -112,35 +104,39 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
             if "Transformer |" in metric_name and "(RelErr)" not in metric_name:
                 # MSE metrics (exclude relative error)
                 mean_values = [np.mean(v) for v in values]
-                axes[2].plot(eval_steps, mean_values, 
+                axes[1].plot(eval_steps, mean_values, 
                         color=colors[color_idx_mse % len(colors)], 
                         linewidth=2,
                         label=f"{format_task_name_for_display(task_name)}: {metric_name}")
                 color_idx_mse += 1
-            elif "Transformer |" in metric_name and "(RelErr)" in metric_name:
-                # Relative error metrics
-                mean_values = [np.mean(v) for v in values]
-                axes[3].plot(eval_steps, mean_values, 
+    
+    # Plot min MSE over context length as function of training step
+    for task_name, metrics in eval_metrics.items():
+        for metric_name, values in metrics.items():
+            if "Transformer |" in metric_name and "(RelErr)" not in metric_name:
+                # Calculate min MSE over context length for each training step
+                min_values = [np.min(v) for v in values]
+                axes[2].plot(eval_steps, min_values, 
                         color=colors[color_idx_rel % len(colors)], 
                         linewidth=2,
                         label=f"{format_task_name_for_display(task_name)}: {metric_name}")
                 color_idx_rel += 1
     
-    # Configure MSE plot (axes[2])
+    # Configure MSE plot (axes[1])
+    axes[1].set_xlabel("Training Step")
+    axes[1].set_ylabel("Mean Squared Error")
+    axes[1].set_title(f"MSE Evaluation Metrics - {run_id}")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].set_yscale('log')
+    axes[1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Configure Min MSE plot (axes[2])
     axes[2].set_xlabel("Training Step")
-    axes[2].set_ylabel("Mean Squared Error")
-    axes[2].set_title(f"MSE Evaluation Metrics - {run_id}")
+    axes[2].set_ylabel("Min MSE over Context Length")
+    axes[2].set_title(f"Min MSE over Context Length - {run_id}")
     axes[2].grid(True, alpha=0.3)
     axes[2].set_yscale('log')
     axes[2].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    
-    # Configure Relative Error plot (axes[3])
-    axes[3].set_xlabel("Training Step")
-    axes[3].set_ylabel("Relative Error")
-    axes[3].set_title(f"Relative Error Evaluation Metrics - {run_id}")
-    axes[3].grid(True, alpha=0.3)
-    axes[3].set_yscale('log')
-    axes[3].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
     plt.tight_layout()
     
@@ -167,8 +163,12 @@ def icl_power_law(k, D, alpha, C):
     return C / ((k + 1) ** alpha)
 
 
-def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
-    """Extract minimum MSE over context length and mean MSE over context length for last iteration for all tasks.
+def extract_min_mse_params_for_baseline(log: dict, baseline_type: str) -> tuple[dict, dict]:
+    """Extract minimum MSE over context length and mean MSE over context length for last iteration for all tasks for a specific baseline.
+    
+    Args:
+        log: The log dictionary
+        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
     
     Returns:
         tuple: (min_mse_dict, mean_mse_dict) where:
@@ -196,32 +196,45 @@ def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
     for task_name, metrics in eval_metrics.items():
         if "Fixed task" not in task_name:
             continue
+        
+        # Look for the specific baseline type
+        selected_metric = None
         for metric_name, values in metrics.items():
-            if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
-                # Find the minimum MSE across all context lengths and time steps
+            if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                selected_metric = (metric_name, values)
+                break
+        
+        if selected_metric:
+            metric_name, values = selected_metric
+            # Get mean MSE over context length for the last iteration
+            final_step_mse_values = values[final_step_idx]
+            if final_step_mse_values:
+                mean_mse_over_context = np.mean(final_step_mse_values)
+                min_global_mse = min(final_step_mse_values[1:])
+            else:
+                mean_mse_over_context = float('inf')
                 min_global_mse = float('inf')
-                
-                # for step_idx, step_mse_values in enumerate(values):
-                #     if step_mse_values:
-                #         step_min_mse = min(step_mse_values)
-                #         if step_min_mse < min_global_mse:
-                #             min_global_mse = step_min_mse
-                
-                # Get mean MSE over context length for the last iteration
-                final_step_mse_values = values[final_step_idx]
-                if final_step_mse_values:
-                    mean_mse_over_context = np.mean(final_step_mse_values)
-                    min_global_mse = min(final_step_mse_values)
-                else:
-                    mean_mse_over_context = float('inf')
-                    min_global_mse = float('inf')
 
-                
-                mean_mse_results[task_name] = mean_mse_over_context
-                min_mse_results[task_name] = min_global_mse
-                break  # Only take the first valid metric per task
+            mean_mse_results[task_name] = mean_mse_over_context
+            min_mse_results[task_name] = min_global_mse
     
     return min_mse_results, mean_mse_results
+
+
+def extract_min_mse_params(log: dict) -> tuple[dict, dict]:
+    """Extract minimum MSE over context length and mean MSE over context length for last iteration for all tasks.
+    
+    Returns:
+        tuple: (min_mse_dict, mean_mse_dict) where:
+            min_mse_dict: {task_name: min_mse}
+            mean_mse_dict: {task_name: mean_mse_over_context}
+    """
+    # Try Ridge first, fallback to True
+    min_mse_ridge, mean_mse_ridge = extract_min_mse_params_for_baseline(log, 'Ridge')
+    if min_mse_ridge:  # If Ridge data exists, use it
+        return min_mse_ridge, mean_mse_ridge
+    else:  # Fallback to True
+        return extract_min_mse_params_for_baseline(log, 'True')
 
 
 def extract_power_law_params(log: dict) -> dict:
@@ -248,37 +261,50 @@ def extract_power_law_params(log: dict) -> dict:
     results = {}
     
     for task_name, metrics in eval_metrics.items():
+        # Look for preferred metric (Ridge) first, then fallback to True
+        preferred_metric = None
+        fallback_metric = None
+        
         for metric_name, values in metrics.items():
-            if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
-                # Get MSE values for final step
-                mse_values = values[final_step_idx]
-                if not mse_values or len(mse_values) < 3:
-                    continue
-                    
-                k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+            if "(RelErr)" not in metric_name and values:
+                if "Transformer | Ridge" in metric_name:
+                    preferred_metric = (metric_name, values)
+                elif "Transformer | True" in metric_name:
+                    fallback_metric = (metric_name, values)
+        
+        # Use preferred metric if available, otherwise fallback
+        selected_metric = preferred_metric or fallback_metric
+        
+        if selected_metric:
+            metric_name, values = selected_metric
+            # Get MSE values for final step
+            mse_values = values[final_step_idx]
+            if not mse_values or len(mse_values) < 3:
+                continue
                 
-                try:
-                    # Fit the power law curve
-                    # initial_guess = [mse_values[0] - np.min(mse_values), 1.0, np.min(mse_values)]
-                    initial_guess = [0., 1.0, mse_values[0]]
-                    
-                    popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
-                                         bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
-                    
-                    D_fit, alpha_fit, C_fit = popt
-                    
-                    # Compute R-squared
-                    y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
-                    ss_res = np.sum((mse_values - y_pred) ** 2)
-                    ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
-                    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-                    
-                    results[task_name] = (alpha_fit, C_fit, r_squared)
-                    break  # Only take the first valid metric per task
-                    
-                except Exception as e:
-                    # Skip failed fits
-                    continue
+            k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+            
+            try:
+                # Fit the power law curve
+                # initial_guess = [mse_values[0] - np.min(mse_values), 1.0, np.min(mse_values)]
+                initial_guess = [0., 1.0, mse_values[0]]
+                
+                popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
+                                     bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
+                
+                D_fit, alpha_fit, C_fit = popt
+                
+                # Compute R-squared
+                y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
+                ss_res = np.sum((mse_values - y_pred) ** 2)
+                ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
+                r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                
+                results[task_name] = (alpha_fit, C_fit, r_squared)
+                
+            except Exception as e:
+                # Skip failed fits
+                continue
     
     return results
 
@@ -308,44 +334,58 @@ def fit_mse_curves_and_compute_metrics(log: dict, run_id: str):
     for task_name, metrics in eval_metrics.items():
         print(f"\n{task_name}:")
         
+        # Look for preferred metric (Ridge) first, then fallback to True
+        preferred_metric = None
+        fallback_metric = None
+        
         for metric_name, values in metrics.items():
-            if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values:
-                # Get MSE values for final step
-                mse_values = values[final_step_idx]
-                if not mse_values or len(mse_values) < 3:
-                    continue
-                    
-                k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+            if "(RelErr)" not in metric_name and values:
+                if "Transformer | Ridge" in metric_name:
+                    preferred_metric = (metric_name, values)
+                elif "Transformer | True" in metric_name:
+                    fallback_metric = (metric_name, values)
+        
+        # Use preferred metric if available, otherwise fallback
+        selected_metric = preferred_metric or fallback_metric
+        
+        if selected_metric:
+            metric_name, values = selected_metric
+            # Get MSE values for final step
+            mse_values = values[final_step_idx]
+            if not mse_values or len(mse_values) < 3:
+                continue
                 
-                try:
-                    # Fit the power law curve
-                    # Initial guess: D = mse_values[0] - min(mse_values), alpha = 1, C = min(mse_values)
-                    initial_guess = [mse_values[0] - np.min(mse_values), 1.0, np.min(mse_values)]
-                    
-                    popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
-                                         bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
-                    
-                    D_fit, alpha_fit, C_fit = popt
-                    
-                    # Compute metrics
-                    avg_performance = np.mean(mse_values)
-                    
-                    # Compute R-squared
-                    y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
-                    ss_res = np.sum((mse_values - y_pred) ** 2)
-                    ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
-                    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-                    
-                    print(f"  {metric_name}:")
-                    print(f"    Average MSE over k: {avg_performance:.6f}")
-                    print(f"    Power law fit - alpha: {alpha_fit:.4f}, C: {C_fit:.6f}")
-                    print(f"    D (init error - C): {D_fit:.6f}")
-                    print(f"    R²: {r_squared:.4f}")
-                    
-                except Exception as e:
-                    print(f"  {metric_name}: Failed to fit curve - {str(e)}")
-                    avg_performance = np.mean(mse_values)
-                    print(f"    Average MSE over k: {avg_performance:.6f}")
+            k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+            
+            try:
+                # Fit the power law curve
+                # Initial guess: D = mse_values[0] - min(mse_values), alpha = 1, C = min(mse_values)
+                initial_guess = [mse_values[0] - np.min(mse_values), 1.0, np.min(mse_values)]
+                
+                popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
+                                     bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
+                
+                D_fit, alpha_fit, C_fit = popt
+                
+                # Compute metrics
+                avg_performance = np.mean(mse_values)
+                
+                # Compute R-squared
+                y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
+                ss_res = np.sum((mse_values - y_pred) ** 2)
+                ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
+                r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+                
+                print(f"  {metric_name}:")
+                print(f"    Average MSE over k: {avg_performance:.6f}")
+                print(f"    Power law fit - alpha: {alpha_fit:.4f}, C: {C_fit:.6f}")
+                print(f"    D (init error - C): {D_fit:.6f}")
+                print(f"    R²: {r_squared:.4f}")
+                
+            except Exception as e:
+                print(f"  {metric_name}: Failed to fit curve - {str(e)}")
+                avg_performance = np.mean(mse_values)
+                print(f"    Average MSE over k: {avg_performance:.6f}")
 
 
 def print_summary(log: dict, run_id: str):
@@ -370,14 +410,28 @@ def print_summary(log: dict, run_id: str):
         if key.startswith("eval/") and key != "eval/step":
             task_name = key.split("/")[1]
             print(f"\n{task_name}:")
+            # Look for preferred metric (Ridge) first, then fallback to any Transformer metric
+            preferred_metrics = []
+            fallback_metrics = []
+            
             for metric_name, metric_values in value.items():
-                if "Transformer |" in metric_name and metric_values:
-                    final_mse = np.mean(metric_values[-1])
-                    print(f"  {metric_name}: {final_mse:.6f}")
+                if metric_values:
+                    if "Transformer | Ridge" in metric_name:
+                        preferred_metrics.append((metric_name, metric_values))
+                    elif "Transformer |" in metric_name:
+                        fallback_metrics.append((metric_name, metric_values))
+            
+            # Show preferred metrics first, then fallback metrics
+            metrics_to_show = preferred_metrics if preferred_metrics else fallback_metrics
+            
+            for metric_name, metric_values in metrics_to_show:
+                final_mse = np.mean(metric_values[-1])
+                print(f"  {metric_name}: {final_mse:.6f}")
 
 
 def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
-    """Plot MSE and Relative Error vs context length for every evaluation step."""
+    """Plot MSE and Relative Error vs context length for every evaluation step.
+    Creates separate plots for True and Ridge baselines when both are available."""
     eval_steps = log.get("eval/step", [])
     if not eval_steps:
         print("No evaluation steps found in log")
@@ -393,88 +447,115 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             for metric_name, metric_values in value.items():
                 eval_metrics[task_name][metric_name] = metric_values
     
-    # Create output directories for ICL plots
-    if output_dir is None:
-        output_dir = Path("outputs") / run_id
-    icl_mse_dir = output_dir / "icl_plots_mse"
-    icl_rel_err_dir = output_dir / "icl_plots_rel_err"
-    icl_mse_dir.mkdir(exist_ok=True)
-    icl_rel_err_dir.mkdir(exist_ok=True)
+    # Check which baselines are available
+    ridge_available = False
+    true_available = False
     
-    # Colors for different tasks
-    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+    for task_name, metrics in eval_metrics.items():
+        for metric_name in metrics.keys():
+            if "Transformer | Ridge" in metric_name:
+                ridge_available = True
+            if "Transformer | True" in metric_name:
+                true_available = True
     
-    # Generate plots for each evaluation step
-    for step_idx, eval_step in enumerate(eval_steps):
-        
-        # MSE Plot
-        plt.figure(figsize=(12, 8))
-        color_idx = 0
-        
-        for task_name, metrics in eval_metrics.items():
-            for metric_name, values in metrics.items():
-                if "Transformer | True" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
-                    # Get MSE by position for this step
-                    mse_by_position = values[step_idx]  # List of MSE values by position
-                    n_points = len(mse_by_position)
-                    positions = list(range(1, n_points + 1))  # Context length positions
-                    
-                    plt.plot(positions, mse_by_position,
-                            color=colors[color_idx % len(colors)],
-                            linewidth=2,
-                            marker='o',
-                            markersize=6,
-                            label=f"{format_task_name_for_display(task_name)}")
-                    color_idx += 1
-        
-        plt.xlabel("Context Length (Position)")
-        plt.ylabel("MSE (Transformer vs True)")
-        plt.title(f"ICL MSE Performance at Step {eval_step} - {run_id}")
-        plt.grid(True, alpha=0.3)
-        plt.yscale('log')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        
-        # Save MSE plot for this step
-        output_path = icl_mse_dir / f"icl_step_{eval_step:04d}.png"
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()  # Close to save memory
-        
-        # Relative Error Plot
-        plt.figure(figsize=(12, 8))
-        color_idx = 0
-        
-        for task_name, metrics in eval_metrics.items():
-            for metric_name, values in metrics.items():
-                if "Transformer | True (RelErr)" in metric_name and values and step_idx < len(values):
-                    # Get Relative Error by position for this step
-                    rel_err_by_position = values[step_idx]  # List of RelErr values by position
-                    n_points = len(rel_err_by_position)
-                    positions = list(range(1, n_points + 1))  # Context length positions
-                    
-                    plt.plot(positions, rel_err_by_position,
-                            color=colors[color_idx % len(colors)],
-                            linewidth=2,
-                            marker='o',
-                            markersize=6,
-                            label=f"{format_task_name_for_display(task_name)}")
-                    color_idx += 1
-        
-        plt.xlabel("Context Length (Position)")
-        plt.ylabel("Relative Error (Transformer vs True)")
-        plt.title(f"ICL Relative Error Performance at Step {eval_step} - {run_id}")
-        plt.grid(True, alpha=0.3)
-        plt.yscale('log')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.tight_layout()
-        
-        # Save Relative Error plot for this step
-        output_path = icl_rel_err_dir / f"icl_step_{eval_step:04d}.png"
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        plt.close()  # Close to save memory
+    if not ridge_available and not true_available:
+        print("No Transformer baseline metrics found in log")
+        return
     
-    print(f"ICL MSE plots for {len(eval_steps)} steps saved to: {icl_mse_dir}")
-    print(f"ICL Relative Error plots for {len(eval_steps)} steps saved to: {icl_rel_err_dir}")
+    # Helper function to create plots for a specific baseline
+    def create_icl_plots_for_baseline(baseline_type: str, baseline_suffix: str):
+        # Create output directories for ICL plots
+        if output_dir is None:
+            base_output_dir = Path("outputs") / run_id
+        else:
+            base_output_dir = output_dir
+            
+        icl_mse_dir = base_output_dir / f"icl_plots_mse_{baseline_suffix}"
+        icl_rel_err_dir = base_output_dir / f"icl_plots_rel_err_{baseline_suffix}"
+        icl_mse_dir.mkdir(exist_ok=True)
+        icl_rel_err_dir.mkdir(exist_ok=True)
+        
+        # Colors for different tasks
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+        
+        # Generate plots for each evaluation step
+        for step_idx, eval_step in enumerate(eval_steps):
+            
+            # MSE Plot
+            plt.figure(figsize=(12, 8))
+            color_idx = 0
+            
+            for task_name, metrics in eval_metrics.items():
+                for metric_name, values in metrics.items():
+                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
+                        # Get MSE by position for this step
+                        mse_by_position = values[step_idx]  # List of MSE values by position
+                        n_points = len(mse_by_position)
+                        positions = list(range(1, n_points + 1))  # Context length positions
+                        
+                        plt.plot(positions, mse_by_position,
+                                color=colors[color_idx % len(colors)],
+                                linewidth=2,
+                                marker='o',
+                                markersize=6,
+                                label=f"{format_task_name_for_display(task_name)}")
+                        color_idx += 1
+            
+            plt.xlabel("Context Length (Position)")
+            plt.ylabel(f"MSE (Transformer vs {baseline_type})")
+            plt.title(f"ICL MSE vs {baseline_type} Baseline at Step {eval_step} - {run_id}")
+            plt.grid(True, alpha=0.3)
+            plt.yscale('log')
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+            
+            # Save MSE plot for this step
+            output_path = icl_mse_dir / f"icl_step_{eval_step:04d}.png"
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.close()  # Close to save memory
+            
+            # Relative Error Plot
+            plt.figure(figsize=(12, 8))
+            color_idx = 0
+            
+            for task_name, metrics in eval_metrics.items():
+                for metric_name, values in metrics.items():
+                    if f"Transformer | {baseline_type} (RelErr)" in metric_name and values and step_idx < len(values):
+                        # Get Relative Error by position for this step
+                        rel_err_by_position = values[step_idx]  # List of RelErr values by position
+                        n_points = len(rel_err_by_position)
+                        positions = list(range(1, n_points + 1))  # Context length positions
+                        
+                        plt.plot(positions, rel_err_by_position,
+                                color=colors[color_idx % len(colors)],
+                                linewidth=2,
+                                marker='o',
+                                markersize=6,
+                                label=f"{format_task_name_for_display(task_name)}")
+                        color_idx += 1
+            
+            plt.xlabel("Context Length (Position)")
+            plt.ylabel(f"Relative Error (Transformer vs {baseline_type})")
+            plt.title(f"ICL Relative Error vs {baseline_type} Baseline at Step {eval_step} - {run_id}")
+            plt.grid(True, alpha=0.3)
+            plt.yscale('log')
+            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.tight_layout()
+            
+            # Save Relative Error plot for this step
+            output_path = icl_rel_err_dir / f"icl_step_{eval_step:04d}.png"
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.close()  # Close to save memory
+        
+        print(f"ICL MSE plots ({baseline_type} baseline) for {len(eval_steps)} steps saved to: {icl_mse_dir}")
+        print(f"ICL Relative Error plots ({baseline_type} baseline) for {len(eval_steps)} steps saved to: {icl_rel_err_dir}")
+    
+    # Create plots for available baselines
+    if ridge_available:
+        create_icl_plots_for_baseline('Ridge', 'ridge')
+    
+    if true_available:
+        create_icl_plots_for_baseline('True', 'true')
 
 
 def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
@@ -511,6 +592,12 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
             
             # Sort numerically
             subdirs.sort(key=lambda x: int(x.name))
+            
+            # Extract parameter names from multirun.yaml if no custom labels provided
+            if run_labels is None:
+                param_names = create_run_display_names(run_path, [subdir.name for subdir in subdirs])
+                if param_names:
+                    run_labels = [param_names.get(int(subdir.name), subdir.name) for subdir in subdirs]
             
             # Process each subrun as a separate run
             for subdir_idx, subdir in enumerate(subdirs):
@@ -601,7 +688,18 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
     
     # Create the plots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+    
+    # Choose colormap based on number of runs
+    num_runs = len(data)
+    if num_runs > 10:
+        # Use colormap for many runs
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap('tab20' if num_runs <= 20 else 'hsv')
+        colors = [cmap(i / num_runs) for i in range(num_runs)]
+    else:
+        # Use discrete colors for few runs
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+    
     max_shift = float('inf')
     
     for i, (run_label, run_data) in enumerate(data.items()):
@@ -615,7 +713,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
         alphas = [x[1] for x in run_data if x[0] <= max_shift]
         Cs = [x[2] for x in run_data if x[0] <= max_shift]
         
-        color = colors[i % len(colors)]
+        color = colors[i] if i < len(colors) else colors[i % len(colors)]
         
         # Plot alpha vs task center
         ax1.plot(task_centers, alphas, 'o-', color=color, linewidth=2, 
@@ -677,37 +775,93 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         print("No run paths provided for minimum MSE analysis")
         return
     
-    # Collect minimum MSE and mean MSE over context length data from all runs
-    min_mse_data = {}  # {run_label: [(task_center, min_mse, task_name), ...]}
-    mean_mse_data = {}  # {run_label: [(task_center, mean_mse, task_name), ...]}
-    
-    for i, run_path in enumerate(run_paths):
-        run_path = Path(run_path)
+    # Helper function to collect data for a specific baseline
+    def collect_mse_data_for_baseline(baseline_type: str, run_labels: list = None) -> tuple[dict, dict]:
+        """Collect MSE data for a specific baseline type (True or Ridge)"""
+        min_mse_data = {}  # {run_label: [(task_center, min_mse, task_name), ...]}
+        mean_mse_data = {}  # {run_label: [(task_center, mean_mse, task_name), ...]}
         
-        # Determine run label
-        if run_labels and i < len(run_labels):
-            run_label = run_labels[i]
-        else:
-            run_label = run_path.name
-        
-        # Check if this is a multirun directory or single run
-        if (run_path / "multirun.yaml").exists():
-            # This is a multirun directory - we want to analyze each subrun separately
-            subdirs = []
-            for subdir in run_path.iterdir():
-                if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
-                    subdirs.append(subdir)
+        for i, run_path in enumerate(run_paths):
+            run_path = Path(run_path)
             
-            # Sort numerically
-            subdirs.sort(key=lambda x: int(x.name))
+            # Determine run label
+            if run_labels and i < len(run_labels):
+                run_label = run_labels[i]
+            else:
+                run_label = run_path.name
             
-            # Process each subrun as a separate run
-            for subdir_idx, subdir in enumerate(subdirs):
-                # Load config and log for this subrun
-                config_path = subdir / "config.json"
-                log_path = subdir / "log.json"
+            # Check if this is a multirun directory or single run
+            if (run_path / "multirun.yaml").exists():
+                # This is a multirun directory - we want to analyze each subrun separately
+                subdirs = []
+                for subdir in run_path.iterdir():
+                    if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
+                        subdirs.append(subdir)
                 
-                if not config_path.exists() or not log_path.exists():
+                # Sort numerically
+                subdirs.sort(key=lambda x: int(x.name))
+                
+                # Extract parameter names from multirun.yaml if no custom labels provided
+                if run_labels is None:
+                    param_names = create_run_display_names(run_path, [subdir.name for subdir in subdirs])
+                    if param_names:
+                        run_labels = [param_names.get(int(subdir.name), subdir.name) for subdir in subdirs]
+                
+                # Process each subrun as a separate run
+                for subdir_idx, subdir in enumerate(subdirs):
+                    # Load config and log for this subrun
+                    config_path = subdir / "config.json"
+                    log_path = subdir / "log.json"
+                    
+                    if not config_path.exists() or not log_path.exists():
+                        continue
+                    
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    with open(log_path, 'r') as f:
+                        log = json.load(f)
+                    
+                    # Extract task centers from config
+                    task_centers = config.get('eval', {}).get('task_centers', [])
+                    
+                    # Extract minimum MSE and mean MSE over context length for all tasks
+                    min_mse_params, mean_mse_params = extract_min_mse_params_for_baseline(log, baseline_type)
+                    
+                    # Create run data for this subrun
+                    if run_labels and subdir_idx < len(run_labels):
+                        # Use custom name for this subrun
+                        subrun_label = run_labels[subdir_idx].strip()
+                    else:
+                        subrun_label = f"{run_label}-{subdir.name}"
+                    min_mse_run_data = []
+                    mean_mse_run_data = []
+                    
+                    # Add Test tasks (task center = 0)
+                    if "Test tasks" in min_mse_params:
+                        min_mse = min_mse_params["Test tasks"]
+                        mean_mse = mean_mse_params.get("Test tasks", 0)
+                        min_mse_run_data.append((0.0, min_mse, "Test tasks"))
+                        mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
+                    
+                    # Add Fixed tasks
+                    for task_center in task_centers:
+                        task_name = f"Fixed task {task_center}"
+                        if task_name in min_mse_params:
+                            min_mse = min_mse_params[task_name]
+                            mean_mse = mean_mse_params.get(task_name, 0)
+                            min_mse_run_data.append((task_center, min_mse, task_name))
+                            mean_mse_run_data.append((task_center, mean_mse, task_name))
+                    
+                    if min_mse_run_data:
+                        min_mse_data[subrun_label] = min_mse_run_data
+                        mean_mse_data[subrun_label] = mean_mse_run_data
+            
+            elif (run_path / "log.json").exists():
+                # This is a single run
+                config_path = run_path / "config.json"
+                log_path = run_path / "log.json"
+                
+                if not config_path.exists():
                     continue
                 
                 with open(config_path, 'r') as f:
@@ -719,14 +873,8 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 task_centers = config.get('eval', {}).get('task_centers', [])
                 
                 # Extract minimum MSE and mean MSE over context length for all tasks
-                min_mse_params, mean_mse_params = extract_min_mse_params(log)
+                min_mse_params, mean_mse_params = extract_min_mse_params_for_baseline(log, baseline_type)
                 
-                # Create run data for this subrun
-                if run_labels and subdir_idx < len(run_labels):
-                    # Use custom name for this subrun
-                    subrun_label = run_labels[subdir_idx].strip()
-                else:
-                    subrun_label = f"{run_label}-{subdir.name}"
                 min_mse_run_data = []
                 mean_mse_run_data = []
                 
@@ -747,141 +895,132 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                         mean_mse_run_data.append((task_center, mean_mse, task_name))
                 
                 if min_mse_run_data:
-                    min_mse_data[subrun_label] = min_mse_run_data
-                    mean_mse_data[subrun_label] = mean_mse_run_data
-        
-        elif (run_path / "log.json").exists():
-            # This is a single run
-            config_path = run_path / "config.json"
-            log_path = run_path / "log.json"
+                    min_mse_data[run_label] = min_mse_run_data
+                    mean_mse_data[run_label] = mean_mse_run_data
             
-            if not config_path.exists():
+            else:
+                print(f"Warning: {run_path} is neither a valid run nor multirun directory")
                 continue
-            
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-            with open(log_path, 'r') as f:
-                log = json.load(f)
-            
-            # Extract task centers from config
-            task_centers = config.get('eval', {}).get('task_centers', [])
-            
-            # Extract minimum MSE and mean MSE over context length for all tasks
-            min_mse_params, mean_mse_params = extract_min_mse_params(log)
-            
-            min_mse_run_data = []
-            mean_mse_run_data = []
-            
-            # Add Test tasks (task center = 0)
-            if "Test tasks" in min_mse_params:
-                min_mse = min_mse_params["Test tasks"]
-                mean_mse = mean_mse_params.get("Test tasks", 0)
-                min_mse_run_data.append((0.0, min_mse, "Test tasks"))
-                mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
-            
-            # Add Fixed tasks
-            for task_center in task_centers:
-                task_name = f"Fixed task {task_center}"
-                if task_name in min_mse_params:
-                    min_mse = min_mse_params[task_name]
-                    mean_mse = mean_mse_params.get(task_name, 0)
-                    min_mse_run_data.append((task_center, min_mse, task_name))
-                    mean_mse_run_data.append((task_center, mean_mse, task_name))
-            
-            if min_mse_run_data:
-                min_mse_data[run_label] = min_mse_run_data
-                mean_mse_data[run_label] = mean_mse_run_data
         
-        else:
-            print(f"Warning: {run_path} is neither a valid run nor multirun directory")
-            continue
+        return min_mse_data, mean_mse_data
     
-    if not min_mse_data:
+    # Check which baselines are available
+    ridge_min_data, ridge_mean_data = collect_mse_data_for_baseline('Ridge', run_labels = run_labels)
+    true_min_data, true_mean_data = collect_mse_data_for_baseline('True', run_labels = run_labels)
+    
+    # Determine which plots to create
+    create_ridge_plot = bool(ridge_min_data)
+    create_true_plot = bool(true_min_data)
+    
+    if not create_ridge_plot and not create_true_plot:
         print("No valid data found for minimum MSE analysis")
         return
     
-    # Create the plot with two subplots in a separate figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
-    max_shift = float('inf')
-    
-    # Plot minimum MSE data (left subplot)
-    for i, (run_label, run_data) in enumerate(min_mse_data.items()):
-        if not run_data:
-            continue
+    # Helper function to create a plot for a specific baseline
+    def create_mse_plot(min_mse_data, mean_mse_data, baseline_type: str, fig_suffix: str):
+        # Create the plot with two subplots in a separate figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
-        # Sort by task center
-        run_data.sort(key=lambda x: x[0])
-        
-        task_centers = [x[0] for x in run_data if x[0] <= max_shift]
-        min_mses = [x[1] for x in run_data if x[0] <= max_shift]
-        
-        color = colors[i % len(colors)]
-        
-        # Plot minimum MSE vs task center
-        ax1.plot(task_centers, min_mses, 'o-', color=color, linewidth=2, 
-                markersize=6, label=run_label)
-    
-    # Configure minimum MSE plot
-    ax1.set_xlabel("Task Center (Task Shift)")
-    ax1.set_ylabel("Best MSE over Context Length (Last Iteration)")
-    ax1.set_title("Best MSE over Context Length vs Task Shift")
-    ax1.grid(True, alpha=0.3)
-    ax1.set_yscale('log')
-    ax1.legend()
-    
-    # Plot mean MSE over context length data (right subplot)
-    for i, (run_label, run_data) in enumerate(mean_mse_data.items()):
-        if not run_data:
-            continue
-        
-        # Sort by task center
-        run_data.sort(key=lambda x: x[0])
-        
-        task_centers = [x[0] for x in run_data if x[0] <= max_shift]
-        mean_mses = [x[1] for x in run_data if x[0] <= max_shift]
-        
-        color = colors[i % len(colors)]
-        
-        # Plot mean MSE over context length vs task center
-        ax2.plot(task_centers, mean_mses, 'o-', color=color, linewidth=2, 
-                markersize=6, label=run_label)
-    
-    # Configure mean MSE over context length plot
-    ax2.set_xlabel("Task Center (Task Shift)")
-    ax2.set_ylabel("Mean MSE over Context Length (Last Iteration)")
-    ax2.set_title("Mean MSE over Context Length vs Task Shift")
-    ax2.grid(True, alpha=0.3)
-    ax2.set_yscale('log')
-    ax2.legend()
-    
-    plt.tight_layout()
-    
-    # Save plot
-    if output_dir is None:
-        # Check if we're analyzing multiruns by looking at the first run path
-        if run_paths and (run_paths[0] / "multirun.yaml").exists():
-            output_dir = run_paths[0]  # Use the multirun directory
+        # Choose colormap based on number of runs
+        num_runs = len(min_mse_data)
+        if num_runs > 10:
+            # Use colormap for many runs
+            import matplotlib.cm as cm
+            cmap = cm.get_cmap('tab20' if num_runs <= 20 else 'hsv')
+            colors = [cmap(i / num_runs) for i in range(num_runs)]
         else:
-            output_dir = Path("outputs")
-    output_path = output_dir / "min_mse_analysis.png"
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"Minimum MSE analysis plot saved to: {output_path}")
-    
-    plt.show()
-    
-    # Print summary
-    print(f"\n=== Minimum MSE Analysis Summary ===")
-    for run_label, run_data in min_mse_data.items():
-        if not run_data:
-            continue
-        print(f"\n{run_label}:")
-        mean_data = mean_mse_data.get(run_label, [])
-        mean_dict = {x[2]: x[1] for x in mean_data}  # task_name -> mean_mse
+            # Use discrete colors for few runs
+            colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
         
-        for task_center, min_mse, task_name in sorted(run_data, key=lambda x: x[0]):
-            mean_mse = mean_dict.get(task_name, "N/A")
-            print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, mean_mse_last_iter={mean_mse:.6f}")
+        max_shift = float('inf')
+        
+        # Plot minimum MSE data (left subplot)
+        for i, (run_label, run_data) in enumerate(min_mse_data.items()):
+            if not run_data:
+                continue
+            
+            # Sort by task center
+            run_data.sort(key=lambda x: x[0])
+            
+            task_centers = [x[0] for x in run_data if x[0] <= max_shift]
+            min_mses = [x[1] for x in run_data if x[0] <= max_shift]
+            
+            color = colors[i] if i < len(colors) else colors[i % len(colors)]
+            
+            # Plot minimum MSE vs task center
+            ax1.plot(task_centers, min_mses, 'o-', color=color, linewidth=2, 
+                    markersize=6, label=run_label)
+        
+        # Configure minimum MSE plot
+        ax1.set_xlabel("Task Center (Task Shift)")
+        ax1.set_ylabel(f"Best MSE vs {baseline_type} Baseline (Last Iteration)")
+        ax1.set_title(f"Best MSE vs {baseline_type} Baseline vs Task Shift")
+        ax1.grid(True, alpha=0.3)
+        ax1.set_yscale('log')
+        ax1.legend()
+        
+        # Plot mean MSE over context length data (right subplot)
+        for i, (run_label, run_data) in enumerate(mean_mse_data.items()):
+            if not run_data:
+                continue
+            
+            # Sort by task center
+            run_data.sort(key=lambda x: x[0])
+            
+            task_centers = [x[0] for x in run_data if x[0] <= max_shift]
+            mean_mses = [x[1] for x in run_data if x[0] <= max_shift]
+            
+            color = colors[i] if i < len(colors) else colors[i % len(colors)]
+            
+            # Plot mean MSE over context length vs task center
+            ax2.plot(task_centers, mean_mses, 'o-', color=color, linewidth=2, 
+                    markersize=6, label=run_label)
+        
+        # Configure mean MSE over context length plot
+        ax2.set_xlabel("Task Center (Task Shift)")
+        ax2.set_ylabel(f"Mean MSE vs {baseline_type} Baseline (Last Iteration)")
+        ax2.set_title(f"Mean MSE vs {baseline_type} Baseline vs Task Shift")
+        ax2.grid(True, alpha=0.3)
+        ax2.set_yscale('log')
+        ax2.legend()
+        
+        plt.tight_layout()
+        
+        # Save plot
+        if output_dir is None:
+            # Check if we're analyzing multiruns by looking at the first run path
+            if run_paths and (run_paths[0] / "multirun.yaml").exists():
+                output_dir_to_use = run_paths[0]  # Use the multirun directory
+            else:
+                output_dir_to_use = Path("outputs")
+        else:
+            output_dir_to_use = output_dir
+            
+        output_path = output_dir_to_use / f"min_mse_analysis_{fig_suffix}.png"
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"Minimum MSE analysis ({baseline_type}) plot saved to: {output_path}")
+        
+        plt.show()
+        
+        # Print summary for this baseline
+        print(f"\n=== Minimum MSE Analysis Summary ({baseline_type} Baseline) ===")
+        for run_label, run_data in min_mse_data.items():
+            if not run_data:
+                continue
+            print(f"\n{run_label}:")
+            mean_data = mean_mse_data.get(run_label, [])
+            mean_dict = {x[2]: x[1] for x in mean_data}  # task_name -> mean_mse
+            
+            for task_center, min_mse, task_name in sorted(run_data, key=lambda x: x[0]):
+                mean_mse = mean_dict.get(task_name, "N/A")
+                print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, mean_mse_last_iter={mean_mse:.6f}")
+    
+    # Create plots for available baselines
+    if create_ridge_plot:
+        create_mse_plot(ridge_min_data, ridge_mean_data, 'Ridge', 'ridge')
+    
+    if create_true_plot:
+        create_mse_plot(true_min_data, true_mean_data, 'True', 'true')
 
 
 def analyze_multirun(multirun_id: str, custom_names: list = None):
@@ -907,6 +1046,12 @@ def analyze_multirun(multirun_id: str, custom_names: list = None):
     
     # Sort subdirectories numerically
     run_subdirs.sort(key=int)
+    
+    # Extract parameter names from multirun.yaml if custom names not provided
+    if custom_names is None:
+        param_names = create_run_display_names(multirun_dir, run_subdirs)
+        if param_names:
+            custom_names = [param_names.get(int(subdir), subdir) for subdir in run_subdirs]
     
     print(f"\n=== Analyzing Multirun: {multirun_id} ===")
     print(f"Found {len(run_subdirs)} completed runs: {', '.join(run_subdirs)}")
@@ -935,6 +1080,105 @@ def analyze_multirun(multirun_id: str, custom_names: list = None):
 
 
 
+
+
+def extract_swept_params(multirun_path: Path) -> list:
+    """Extract swept parameter names from multirun.yaml file.
+    
+    Args:
+        multirun_path: Path to the multirun directory
+    
+    Returns:
+        list: List of parameter paths that were swept (e.g., ['task.distrib_param'])
+    """
+    multirun_yaml_path = multirun_path / "multirun.yaml"
+    
+    if not multirun_yaml_path.exists():
+        return []
+    
+    try:
+        with open(multirun_yaml_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Extract swept parameters from hydra config
+        params = config.get('hydra', {}).get('sweeper', {}).get('params', {})
+        
+        if not params:
+            return []
+        
+        # Return list of parameter paths
+        return list(params.keys())
+        
+    except Exception as e:
+        print(f"Warning: Could not parse multirun.yaml: {e}")
+        return []
+
+
+def get_param_value_from_config(config: dict, param_path: str):
+    """Get parameter value from config using dotted path.
+    
+    Args:
+        config: Configuration dictionary
+        param_path: Dotted parameter path (e.g., 'task.distrib_param')
+    
+    Returns:
+        Parameter value or None if not found
+    """
+    keys = param_path.split('.')
+    value = config
+    
+    try:
+        for key in keys:
+            value = value[key]
+        return value
+    except (KeyError, TypeError):
+        return None
+
+
+def create_run_display_names(multirun_path: Path, run_subdirs: list) -> dict:
+    """Create display names for runs based on their actual parameter values.
+    
+    Args:
+        multirun_path: Path to the multirun directory
+        run_subdirs: List of run subdirectory names (e.g., ['0', '1'])
+    
+    Returns:
+        dict: {run_index: display_name} mapping based on actual parameter values
+    """
+    # Get swept parameters from multirun.yaml
+    swept_params = extract_swept_params(multirun_path)
+    
+    if not swept_params:
+        return {}
+    
+    display_names = {}
+    
+    for subdir in run_subdirs:
+        config_path = multirun_path / subdir / "config.json"
+        
+        if not config_path.exists():
+            continue
+            
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            # Build display name from parameter values
+            name_parts = []
+            for param_path in swept_params:
+                value = get_param_value_from_config(config, param_path)
+                if value is not None:
+                    param_name = param_path.split('.')[-1]  # Get last part of dotted path
+                    name_parts.append(f"{param_name}={value}")
+            
+            if name_parts:
+                display_names[int(subdir)] = ", ".join(name_parts)
+            
+        except Exception as e:
+            print(f"Warning: Could not read config for run {subdir}: {e}")
+            continue
+    
+    return display_names
 
 
 def parse_multirun_args(multirun_arg, run_id_arg):
@@ -1030,6 +1274,7 @@ Examples:
             plot_min_mse_analysis(run_paths, run_labels=custom_names)
         except Exception as e:
             print(f"Error in task shift analysis: {e}")
+            raise e
             return 1
             
     elif args.multirun:

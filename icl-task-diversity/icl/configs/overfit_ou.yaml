@@ -3,7 +3,8 @@ output_dir: ./outputs
 log_level: INFO
 
 task:
-  name: noisy_linear_regression
+  name: ornstein_uhlenbeck
+  ou_step: 0.2
   n_tasks: 2
   n_data: 2
   n_dims: 2
@@ -20,7 +21,7 @@ task:
   n_max_points: 4
 
 model:
-  name: transformer
+  name: single_seq_transformer
   n_points: 4
   n_layer: 4
   n_embd: 16
@@ -28,6 +29,7 @@ model:
   seed: 100
   use_ln: true
   use_linear_attention: true
+  n_out: 2
 
 training:
   optimizer: adamw
@@ -45,7 +47,6 @@ eval:
   noise_seed: 106
   every: 25
   eval_n_points: 4
-  eval_ridge: false
   task_centers:
     - 2.0
     - 4.0

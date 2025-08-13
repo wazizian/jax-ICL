@@ -17,16 +17,24 @@ from hydra.core.hydra_config import HydraConfig
 
 import icl.utils as u
 from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_error
-from icl.models import Transformer, get_model
+from icl.models import Transformer, SingleSeqTransformer, get_model
 from icl.optim import get_optimizer_and_lr_schedule
 from icl.tasks import Sampler, Task, get_task, get_task_name
 
 
-def initialize(model: Transformer, config: ConfigDict) -> tuple[FrozenDict, Array]:
+def initialize(model: Transformer | SingleSeqTransformer, config: ConfigDict) -> tuple[FrozenDict, Array]:
     params_rng, dropout_rng = jr.split(jr.PRNGKey(config.model.seed))
     dummy_data = jnp.ones((config.task.batch_size, config.model.n_points, config.task.n_dims), dtype=model.dtype)
-    dummy_targets = jnp.ones((config.task.batch_size, config.model.n_points), dtype=model.dtype)
-    dummy_mask = jnp.ones((config.task.batch_size, 2 * config.model.n_points, 2 * config.model.n_points)).astype(bool)
+    
+    if isinstance(model, SingleSeqTransformer):
+        # For SingleSeqTransformer, targets have n_dims dimensions (not scalar)
+        dummy_targets = jnp.ones((config.task.batch_size, config.model.n_points, config.task.n_dims), dtype=model.dtype)
+        dummy_mask = jnp.ones((config.task.batch_size, config.model.n_points, config.model.n_points)).astype(bool)
+    else:
+        # For regular Transformer, targets are scalar
+        dummy_targets = jnp.ones((config.task.batch_size, config.model.n_points), dtype=model.dtype)
+        dummy_mask = jnp.ones((config.task.batch_size, 2 * config.model.n_points, 2 * config.model.n_points)).astype(bool)
+    
     variables = jax.jit(model.init)(params_rng, dummy_data, dummy_targets, dummy_mask)
     return variables["params"], dropout_rng
 
@@ -106,8 +114,11 @@ def train(config: ConfigDict) -> None:
     logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\n")
     
     # Validate config 
-    assert config.model.n_points == config.task.n_points, "Model n_points must match Task n_points"
-    assert config.eval.eval_n_points <= config.task.n_points, "Eval n_points must be less than or equal to Task n_points"
+    assert config.model.n_points == config.task.n_max_points, "Model n_points must match Task n_max_points"
+    assert config.task.n_points <= config.task.n_max_points, "Task n_points must be less than or equal to Task n_max_points"
+    assert config.eval.eval_n_points <= config.task.n_max_points, "Eval n_points must be less than or equal to Task n_points"
+    if config.model.name == "SingleSeqTransformer":
+        assert config.task.n_dims == config.model.n_out, "Task n_dims must match Model n_outs"
 
     # Config is already saved by Hydra, but save our version too  
     config_file = exp_dir / "config.json"
@@ -130,9 +141,9 @@ def train(config: ConfigDict) -> None:
 
     # Data samplers
     train_task = get_task(**config.task, dtype=jnp.dtype(config.dtype))
-    j_sample_train_batch = jax.jit(get_sharded_batch_sampler(train_task))
+    j_sample_train_batch = (get_sharded_batch_sampler(train_task))
     j_samplers_eval_batch = {
-        get_task_name(task): jax.jit(get_sharded_batch_sampler(task))
+        get_task_name(task): (get_sharded_batch_sampler(task))
         for task in train_task.get_default_eval_tasks(**config.eval)
     }
     logging.info("Initialized Data Samplers")

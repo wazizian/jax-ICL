@@ -172,16 +172,23 @@ for nu in nus:
     z = y + 0.01* log_sum_student_interval_prob_alpha(0.5, 0.1, 2, jnp.sqrt((nu - 2.0) / nu), nu, d) 
     results[nu] = y / C
 
+rho = 0.5
+sigma = 0.5
+new_results = {}
+for nu, res in results.items():
+    new_res = (jnp.exp(2 * res)  - 1) * (sigma**2 / (rho * ( 1 - rho)))
+    new_results[nu] = new_res
+
 # ---------- Plot ----------
 plt.figure(figsize=(12, 8))
 colors = {3.0: 'blue', 5.0: 'green', 10.0: 'orange', jnp.inf: 'red'}
 for nu in nus:
     label = "Normal (ν=∞)" if jnp.isinf(nu) else f"Student ν={int(nu)}"
-    plt.plot(x_grid, results[nu], color=colors[nu], label=label, linewidth=2)
+    plt.plot(x_grid, new_results[nu], color=colors[nu], label=label, linewidth=2)
     # Add markers at every 0.25
     marker_indices = jnp.arange(0, len(x_grid), len(x_grid) // (int((x_grid[-1] - x_grid[0]) / 0.25) + 1))
     marker_x = x_grid[marker_indices]
-    marker_y = results[nu][marker_indices]
+    marker_y = new_results[nu][marker_indices]
     plt.plot(marker_x, marker_y, 'o', color=colors[nu], markersize=4)
 
 plt.xlabel("Task shift")

@@ -3,11 +3,12 @@ output_dir: ./outputs
 log_level: INFO
 
 task:
-  name: noisy_linear_regression
+  name: ornstein_uhlenbeck
   n_tasks: 0
   n_data: 0
   n_dims: 2
   n_points: 5
+  n_max_points: 5
   batch_size: 8
   data_seed: 101
   task_seed: 102
@@ -18,10 +19,11 @@ task:
   clip: null
   use_weights: false
   distrib_name: student
-  distrib_param: .inf
+  distrib_param: 3.0
+  ou_step: 0.2
 
 model:
-  name: transformer
+  name: single_seq_transformer
   n_points: 5
   n_layer: 2
   n_embd: 2
@@ -29,6 +31,7 @@ model:
   seed: 100
   use_ln: true
   use_linear_attention: false
+  n_out: 2
 
 training:
   optimizer: adam

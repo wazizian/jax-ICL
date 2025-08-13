@@ -4,6 +4,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from jax import Array
+import chex
 
 import icl.utils as u
 from icl.gpt2 import GPT2Config, GPT2Model, init_fn
@@ -55,16 +56,85 @@ class Transformer(nn.Module):
         self._out = nn.Dense(1, False, self.dtype, kernel_init=init_fn)
 
     def __call__(self, data: Array, targets: Array, attention_mask: Array, training: bool = False) -> Array:
+        # Batch size
+        batch_size = data.shape[0]
         # Get actual sequence length before padding
         actual_seq_len = data.shape[1]
+        # Data features
+        n_features = data.shape[2]
+        
+        chex.assert_shape(data, (batch_size, actual_seq_len, n_features))
+        chex.assert_shape(targets, (batch_size, actual_seq_len))
         
         # Pad input sequence to match the model's expected block_size
         target_seq_len = self.n_points  # Expected number of data points
+
+        chex.assert_shape(attention_mask, (batch_size, 2 * self.n_points, 2 * self.n_points))
+
         input_seq = u.to_seq(data, targets, target_seq_len=target_seq_len)
+
         embds = self._in(input_seq)
         outputs = self._h(input_embds=embds, attention_mask=attention_mask, training=training)
         preds = self._out(outputs)
         preds = u.seq_to_targets(preds, actual_seq_len=actual_seq_len)
+        return preds
+
+########################################################################################################################
+# Single Seq Transformer                                                                                                          #
+########################################################################################################################
+
+
+class SingleSeqTransformer(nn.Module):
+    n_points: int
+    n_layer: int
+    n_embd: int
+    n_head: int
+    seed: int
+    dtype: Any
+    use_ln: bool = True
+    use_linear_attention: bool = False
+    n_out: int = 1
+
+    def setup(self):
+        config = GPT2Config(
+            block_size=self.n_points,
+            n_layer=self.n_layer,
+            n_head=self.n_head,
+            n_embd=self.n_embd,
+            dtype=self.dtype,
+            use_ln=self.use_ln,
+            use_linear_attention=self.use_linear_attention,
+        )
+        self._in = nn.Dense(self.n_embd, False, self.dtype, kernel_init=init_fn)
+        self._h = GPT2Model(config)
+        self._out = nn.Dense(self.n_out, False, self.dtype, kernel_init=init_fn)
+
+    def __call__(self, data: Array, targets: Array, attention_mask: Array, training: bool = False) -> Array:
+        # Batch size
+        batch_size = targets.shape[0]
+        # Get actual sequence length before padding
+        actual_seq_len = targets.shape[1]
+        # Target features
+        n_target_features = targets.shape[2]
+        
+        chex.assert_shape(targets, (batch_size, actual_seq_len, n_target_features))
+        
+        # Pad input sequence to match the model's expected block_size
+        target_seq_len = self.n_points  # Expected number of data points
+
+        chex.assert_shape(attention_mask, (batch_size, self.n_points, self.n_points))
+
+        input_seq = u.pad_sequence(targets, target_seq_len=target_seq_len)
+        chex.assert_shape(input_seq, (batch_size, self.n_points, n_target_features))
+
+        embds = self._in(input_seq)
+        outputs = self._h(input_embds=embds, attention_mask=attention_mask, training=training)
+        preds = self._out(outputs)
+        chex.assert_shape(preds, (batch_size, self.n_points, n_target_features))
+
+        preds = u.unpad_sequence(preds, actual_seq_len=actual_seq_len)
+        chex.assert_shape(preds, (batch_size, actual_seq_len, n_target_features))
+
         return preds
 
 
@@ -174,5 +244,5 @@ Model = Transformer | Ridge | DiscreteMMSE
 
 
 def get_model(name: str, **kwargs) -> Model:
-    models = {"transformer": Transformer, "ridge": Ridge, "discrete_mmse": DiscreteMMSE}
+    models = {"transformer": Transformer, "ridge": Ridge, "discrete_mmse": DiscreteMMSE, "single_seq_transformer": SingleSeqTransformer}
     return models[name](**kwargs)

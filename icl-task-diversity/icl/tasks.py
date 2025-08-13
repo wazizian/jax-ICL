@@ -1,5 +1,6 @@
 import dataclasses
 from typing import Any, Callable, List
+import logging
 
 import jax
 import jax.numpy as jnp
@@ -230,6 +231,10 @@ class NoisyLinearRegression:
     use_weights: bool = False  # Optional, whether to use task importance weights
     distrib_name: str = "normal"  # Distribution name: "normal" or "student"
     distrib_param: float | None = None  # Distribution parameter (degrees of freedom for student-t)
+    use_curriculum: bool = False  # Whether to use curriculum learning
+    curriculum_n_points_increment: int = 2  # Increment for curriculum learning
+    curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
+
 
     def __post_init__(self):
         # Validation
@@ -334,8 +339,16 @@ class NoisyLinearRegression:
         mask = mask.at[:effective_seq_len, :effective_seq_len].set(valid_mask)
         return mask
 
-    @jax.jit
+    def curriculum_increment(self):
+        old_n_points = self.n_points
+        self.n_points = min(self.n_points + self.curriculum_n_points_increment, 
+                           self.n_max_points)
+        if self.n_points > old_n_points:
+            logging.info(f"Curriculum increment: n_points {old_n_points} -> {self.n_points}")
+
     def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+        if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
+            self.curriculum_increment()
         data, (tasks, weights) = self.sample_data(step), self.sample_tasks(step)
         targets = self.evaluate(data, tasks, step)
         attention_mask = self.generate_attention_mask()
@@ -362,6 +375,7 @@ class NoisyLinearRegression:
         config["n_tasks"] = 0
         config["n_data"] = 0
         config["n_max_points"] = self.n_max_points
+        config["use_curriculum"] = False  # Disable curriculum for evaluation
         config["use_weights"] = False
         eval_tasks = []
         n_points = eval_n_points
@@ -433,6 +447,9 @@ class NoisyLinearRegression:
             'use_weights': self.use_weights,
             'distrib_name': self.distrib_name,
             'distrib_param': self.distrib_param,
+            'use_curriculum': self.use_curriculum,
+            'curriculum_n_points_increment': self.curriculum_n_points_increment,
+            'curriculum_steps_thresh': self.curriculum_steps_thresh,
         }
         
         return (children, aux_data)
@@ -468,6 +485,328 @@ tree_util.register_pytree_node(NoisyLinearRegression,
                                NoisyLinearRegression._tree_unflatten)
 
 ########################################################################################################################
+# Ornstein-Uhlenbeck Process Task for In-Context Learning
+########################################################################################################################
+
+
+
+@dataclasses.dataclass
+class OrnsteinUhlenbeckTask:
+    n_tasks: int
+    n_data: int
+    n_dims: int
+    n_points: int
+    batch_size: int
+    data_seed: int
+    task_seed: int
+    noise_seed: int
+    data_scale: float
+    task_scale: float
+    noise_scale: float
+    dtype: Any
+    task_center: float | None = None
+    n_max_points: int | None = None  # Optional, used for padding in some models
+    clip: float | None = None  # Optional, clip task vectors to [-clip, clip]^d
+    name: str | None = None  # Optional, can be set to override default name
+    eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
+    use_weights: bool = False  # Optional, whether to use task importance weights
+    distrib_name: str = "normal"  # Distribution name: "normal" or "student"
+    distrib_param: float | None = None  # Distribution parameter (degrees of freedom for student-t)
+    use_curriculum: bool = False  # Whether to use curriculum learning
+    curriculum_n_points_increment: int = 2  # Increment for curriculum learning
+    curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
+    ou_step: float = 1e-2
+
+
+    def __post_init__(self):
+        # Validation
+        self.data_key = jax.random.PRNGKey(self.data_seed)
+        self.task_key = jax.random.PRNGKey(self.task_seed)
+        self.noise_key = jax.random.PRNGKey(self.noise_seed)
+        self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
+        self.task_center = 0.0 if self.task_center is None else self.task_center
+        task_pool, weights = self.generate_task_pool() if self.n_tasks > 0 else (None, None)
+        self.task_pool = task_pool
+        self.weights = weights
+        self.data_pool = None
+        self.name = f"NoisyLinReg({self.n_tasks})" if self.name is None else self.name
+
+    @classmethod
+    def from_task_pool(cls, task_pool: Array, weights: Array, **kwargs):
+        assert kwargs["n_tasks"] == task_pool.shape[0]
+        task = cls(**kwargs)
+        task.task_pool = task_pool
+        task.weights = weights
+        return task
+
+    def generate_task_pool(self) -> Array:
+        key = jax.random.fold_in(self.task_key, 0)
+        shape = self.n_tasks, 2 * self.n_dims, 1
+        tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
+                              self.distrib_name, self.distrib_param, shape, self.dtype)
+        log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                     self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+        #weights = jax.nn.softmax(log_weights, axis=0)
+        weights = log_weights
+        return tasks, weights
+
+    def generate_data_pool(self) -> Array:
+        key = jax.random.fold_in(self.data_key, 0)
+        shape = self.n_data, self.n_points, self.n_dims
+        data = jax.random.normal(key, shape, self.dtype) * self.data_scale
+        return data
+
+    @jax.jit
+    def sample_data(self, step: int) -> Array:
+        key = jax.random.fold_in(self.data_key, step)
+        if self.n_data > 0:
+            idxs = jax.random.choice(key, self.n_data, (self.batch_size,))
+            data = self.data_pool[idxs]
+        else:
+            shape = self.batch_size, self.n_points, self.n_dims
+            data = jax.random.normal(key, shape, self.dtype) * self.data_scale + self.task_center
+        return data
+
+    @jax.jit
+    def sample_tasks(self, step: int) -> Array:
+        key = jax.random.fold_in(self.task_key, step)
+        if self.n_tasks > 0:
+            idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
+            # jax.debug.print("Sampled indices for tasks: {}", idxs)
+            tasks = self.task_pool[idxs]
+            # log_weights = self.weights[idxs] 
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+        else:
+            shape = self.batch_size, 2 * self.n_dims, 1
+            tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
+                                 self.distrib_name, self.distrib_param, shape, self.dtype)
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+        chex.assert_shape(tasks, (self.batch_size, 2 * self.n_dims, 1))
+        chex.assert_shape(weights, (self.batch_size, 1))
+        # jax.debug.print("Weights sum: {}", jnp.sum(weights))
+        # jax.debug.print("Batch statistics: tasks min {}, max {}, mean {}",
+        #                jnp.min(tasks), jnp.max(tasks), jnp.mean(tasks))
+        return tasks, weights
+
+    @jax.jit
+    def evaluate(self, tasks: Array, step: int) -> Array:
+        chex.assert_shape(tasks, (self.batch_size, 2 * self.n_dims, 1))
+
+        mu = tasks[:, :self.n_dims, 0]  # Mean of the OU process
+        chex.assert_shape(mu, (self.batch_size, self.n_dims))
+
+        theta = jnp.tanh(0.2 * tasks[:, self.n_dims:, 0])  # Decay rate, rescaled to (-1, 1)
+        chex.assert_shape(theta, (self.batch_size, self.n_dims))
+
+        key = jax.random.fold_in(self.noise_key, step)
+        all_noise = jax.random.normal(key, (self.n_points, self.batch_size, self.n_dims), self.dtype) * self.noise_scale
+        init = jnp.zeros((self.batch_size, self.n_dims))  # Initial state of the OU process
+        
+        def ou_step(carry, noise):
+            prev_state = carry
+            chex.assert_shape(prev_state, (self.batch_size, self.n_dims))
+
+            next_state = prev_state + theta * (mu - prev_state) * self.ou_step  + jnp.sqrt(self.ou_step) * noise
+            chex.assert_shape(next_state, (self.batch_size, self.n_dims))
+
+            return next_state, next_state
+        # Run the OU process for n_points steps
+        _, ou_steps = jax.lax.scan(ou_step, init, all_noise)
+        chex.assert_shape(ou_steps, (self.n_points, self.batch_size, self.n_dims))
+
+        ou_steps = jnp.transpose(ou_steps, (1, 0, 2))  # Shape: (batch_size, n_points, n_dims)
+        chex.assert_shape(ou_steps, (self.batch_size, self.n_points, self.n_dims))
+
+        return ou_steps
+
+    @jax.jit
+    def generate_attention_mask(self) -> Array:
+        """Generate causal attention mask for the sequence with right padding.
+        
+        Creates a mask of size (n_max_points, n_max_points) where:
+        - First n_points positions are valid (actual data) 
+        - Remaining positions are padded and masked out (right padding)
+        - Within valid positions, uses causal attention (can only attend to previous positions)
+        """
+        effective_seq_len = self.n_points      # Valid data: positions 0 to this-1
+        max_seq_len = self.n_max_points        # Total padded length
+        
+        # Start with all positions masked (False)
+        mask = jnp.zeros((max_seq_len, max_seq_len), dtype=bool)
+        
+        # Valid region gets causal attention pattern
+        valid_mask = jnp.tril(jnp.ones((effective_seq_len, effective_seq_len))).astype(bool)
+        
+        # Insert valid causal mask into full mask 
+        mask = mask.at[:effective_seq_len, :effective_seq_len].set(valid_mask)
+        return mask
+
+    def curriculum_increment(self):
+        old_n_points = self.n_points
+        self.n_points = min(self.n_points + self.curriculum_n_points_increment, 
+                           self.n_max_points)
+        if self.n_points > old_n_points:
+            logging.info(f"Curriculum increment: n_points {old_n_points} -> {self.n_points}")
+
+    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+        if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
+            self.curriculum_increment()
+        (tasks, weights) = self.sample_tasks(step)
+        targets = self.evaluate(tasks, step)
+        data = targets
+        attention_mask = self.generate_attention_mask()
+        return data, tasks, weights, targets, attention_mask
+
+    @jax.jit
+    def evaluate_oracle(self, data: Array, tasks: Array) -> Array:
+        targets = data
+        n_points = targets.shape[1]
+        batch_size = targets.shape[0]
+        chex.assert_shape(targets, (batch_size, n_points, self.n_dims))
+
+        init = jnp.zeros((batch_size, self.n_dims))  # Initial state of the OU process
+
+        prev_states = jnp.concatenate((init[:, None, :], data[:, :-1, :]), axis=1)
+        chex.assert_shape(prev_states, (batch_size, n_points, self.n_dims))
+
+        mu = tasks[:, :self.n_dims, 0]  # Mean of the OU process
+        chex.assert_shape(mu, (batch_size, self.n_dims))
+
+        theta = jnp.tanh(0.2 * tasks[:, self.n_dims:, 0])  # Decay rate, rescaled to (-1, 1)
+        chex.assert_shape(theta, (batch_size, self.n_dims))
+
+        oracle_states = prev_states + theta[:, None, :] * (mu[:, None, :] - prev_states) * self.ou_step
+        chex.assert_shape(oracle_states, (batch_size, n_points, self.n_dims))
+
+        return oracle_states
+
+    def get_default_eval_tasks(
+            self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], task_centers: List[float] | None = None, **kwargs
+            ) -> list["OrnsteinUhlenbeckTask"]:
+        del kwargs
+        assert task_seed != self.task_seed
+        assert data_seed != self.data_seed
+        assert noise_seed != self.noise_seed
+        config = dataclasses.asdict(self)
+        config["batch_size"] = batch_size
+        config["task_seed"] = task_seed
+        config["data_seed"] = data_seed
+        config["noise_seed"] = noise_seed
+        config["n_tasks"] = 0
+        config["n_data"] = 0
+        config["n_max_points"] = self.n_max_points
+        config["use_curriculum"] = False  # Disable curriculum for evaluation
+        config["use_weights"] = False
+        eval_tasks = []
+        n_points = eval_n_points
+        assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
+        config["n_points"] = n_points
+        # Test  with fresh tasks from training distribution
+        name = f"Test tasks"
+        config["name"] = name
+        eval_tasks.append(self.__class__(**config))
+
+        # Test with same tasks as training distribution
+        if self.n_tasks > 0:
+            name = f"Train tasks"
+            config["n_tasks"] = self.n_tasks
+            config["name"] = name
+            eval_tasks.append(OrnsteinUhlenbeckTask.from_task_pool(**config, task_pool=self.task_pool.copy(), weights=self.weights.copy()))
+        
+        config["n_tasks"] = 0  # Reset for fresh tasks
+
+        # Test with fixed task centers
+        if task_centers is not None:
+            config["distrib_name"] = "normal"  # Reset to normal distribution for fixed tasks
+            for task_center in task_centers:
+                config["task_center"] = task_center
+                # config["task_scale"] = 0.
+                config["clip"] = None
+                name = f"Fixed task {task_center}"
+                config["name"] = name
+                eval_tasks.append(self.__class__(**config))
+        return eval_tasks
+
+    def get_default_eval_models(self) -> list[Model]:
+        return []
+
+    def _tree_flatten(self):
+        # Dynamic values (arrays, keys, and values that can change)
+        children = (
+            self.data_key,
+            self.task_key, 
+            self.noise_key,
+            self.task_pool,
+            self.weights,
+            self.data_pool,
+            self.data_scale,
+            self.task_scale,
+            self.noise_scale,
+            self.task_center,
+            self.clip,
+        )
+        
+        # Static values (configuration that doesn't change during execution)
+        aux_data = {
+            'n_tasks': self.n_tasks,
+            'n_data': self.n_data,
+            'n_dims': self.n_dims,
+            'n_points': self.n_points,
+            'batch_size': self.batch_size,
+            'data_seed': self.data_seed,
+            'task_seed': self.task_seed,
+            'noise_seed': self.noise_seed,
+            'dtype': self.dtype,
+            'n_max_points': self.n_max_points,
+            'name': self.name,
+            'eval_ridge': self.eval_ridge,
+            'use_weights': self.use_weights,
+            'distrib_name': self.distrib_name,
+            'distrib_param': self.distrib_param,
+            'use_curriculum': self.use_curriculum,
+            'curriculum_n_points_increment': self.curriculum_n_points_increment,
+            'curriculum_steps_thresh': self.curriculum_steps_thresh,
+            'ou_step': self.ou_step,
+        }
+        
+        return (children, aux_data)
+
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+        (data_key, task_key, noise_key, task_pool, weights, data_pool,
+         data_scale, task_scale, noise_scale, task_center, clip) = children
+        
+        # Create object with aux_data parameters and placeholder scale values
+        obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
+                 task_center=0.0, clip=None, **aux_data)
+        
+        # Set the dynamic values
+        obj.data_key = data_key
+        obj.task_key = task_key
+        obj.noise_key = noise_key
+        obj.task_pool = task_pool
+        obj.weights = weights
+        obj.data_pool = data_pool
+        obj.data_scale = data_scale
+        obj.task_scale = task_scale
+        obj.noise_scale = noise_scale
+        obj.task_center = task_center
+        obj.clip = clip
+        
+        return obj
+
+
+# Register OrnsteinUhlenbeckTask as a PyTree
+tree_util.register_pytree_node(OrnsteinUhlenbeckTask,
+                               OrnsteinUhlenbeckTask._tree_flatten,
+                               OrnsteinUhlenbeckTask._tree_unflatten)
+
+
+########################################################################################################################
 # Get Task                                                                                                             #
 ########################################################################################################################
 
@@ -475,5 +814,8 @@ Task = NoisyLinearRegression
 
 
 def get_task(name: str, **kwargs) -> Task:
-    tasks = {"noisy_linear_regression": NoisyLinearRegression}
+    tasks = {
+            "noisy_linear_regression": NoisyLinearRegression,
+            "ornstein_uhlenbeck": OrnsteinUhlenbeckTask,
+            }
     return tasks[name](**kwargs)

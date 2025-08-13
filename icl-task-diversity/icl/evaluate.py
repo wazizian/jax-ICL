@@ -17,7 +17,14 @@ Preds = dict[str, dict[str, Array]]
 
 @jax.jit
 def mse(a: Array, b: Array) -> Array:
-    return jnp.square(a - b).mean(0)
+    # Average over batch dimension and all but sequence dimension
+    return sum_except_dim(jnp.square(a - b), dim=1) / a.shape[0]
+
+
+def sum_except_dim(x, dim):
+    # Get all dimension indices
+    dims = tuple(i for i in range(x.ndim) if i != dim)
+    return jnp.sum(x, axis=dims)
 
 
 @jax.jit  
@@ -59,11 +66,13 @@ def get_bsln_preds(train_task: Task, j_batch_samplers: dict[str, Sampler], n_sam
         # Accumulate preds...
         for i in range(1, n_samples // batch_size + 1):
             xs, ws, weights, ys, attention_mask = j_sample_batch(i)
-            _, _, n_points = ys.shape
-            preds[task_name]["True"].append(p_oracle(xs, ws).reshape(batch_size, n_points))  # ...for oracle
+            # print(f"Evaluating {task_name} batch {i} with {xs.shape[0]} samples and {ys.shape[1]} points ({xs.shape = }, {ws.shape = }, {ys.shape = })")
+            n_points = ys.shape[2]
+            target_shape = ys.shape[1:]  # (batch_size, n_points,) or (batch_size, n_points, n_dims)
+            preds[task_name]["True"].append(p_oracle(xs, ws).reshape(target_shape))
             for model_name, p_model in p_bsln_models.items():  # ...for baseline models
                 # print(f"Evaluating {model_name} on {task_name} batch {i} with {xs.shape[0]} samples and {n_points} points ({xs.shape = }, {ws.shape = }, {ys.shape = })")
-                preds[task_name][model_name].append(p_model(xs, ys).reshape(batch_size, n_points))
+                preds[task_name][model_name].append(p_model(xs, ys).reshape(target_shape))
         # Concatenate preds
         preds[task_name]["True"] = jnp.concatenate(preds[task_name]["True"])
         for model_name in p_bsln_models:
@@ -83,7 +92,8 @@ def get_model_preds(
         preds[task_name] = {"Transformer": []}
         for i in range(1, n_samples // batch_size + 1):
             xs, _, weights, ys, attention_mask = j_sample_batch(i)
-            _, _, n_points = ys.shape
-            preds[task_name]["Transformer"].append(p_eval_step(state, xs, ys, attention_mask).reshape(batch_size, n_points))
+            n_points = ys.shape[2]
+            target_shape = ys.shape[1:]  # (batch_size, n_points,) or (batch_size, n_points, n_dims)
+            preds[task_name]["Transformer"].append(p_eval_step(state, xs, ys, attention_mask).reshape(target_shape))
         preds[task_name]["Transformer"] = jnp.concatenate(preds[task_name]["Transformer"])
     return preds
