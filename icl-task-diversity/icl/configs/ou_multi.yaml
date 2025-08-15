@@ -40,7 +40,7 @@ training:
   lr: 2.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 40_000
-  total_steps: 400_000
+  total_steps: 150_000
   weight_decay: 0.1
 
 eval:
@@ -80,5 +80,5 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      task.distrib_param: inf, 3.0, 5.0, 10.0
-      training.lr: 1e-3, 1e-2
+      task.distrib_param: inf #, 3.0, 5.0, 10.0
+      training.lr: 1e-3 #, 1e-2

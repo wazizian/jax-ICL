@@ -26,11 +26,20 @@ def sum_except_dim(x, dim):
     dims = tuple(i for i in range(x.ndim) if i != dim)
     return jnp.sum(x, axis=dims)
 
+def sum_except_dims(x, dims):
+    # Get all dimension indices except those in dims
+    all_dims = tuple(i for i in range(x.ndim) if i not in dims)
+    return jnp.sum(x, axis=all_dims)
+
+@jax.jit
+def error_per_sample_and_seq_pos(a: Array, b: Array) -> Array:
+    return sum_except_dims(jnp.square(a - b), dims=(0, 1))
 
 @jax.jit  
 def relative_error(a: Array, b: Array) -> Array:
-    """Compute relative error: |a - b|^2 / (|b|^2 + 1) averaged over samples (axis 0)."""
-    return (jnp.square(a - b) / (jnp.square(b) + 1)).mean(0)  # Small epsilon to avoid division by zero
+    n = error_per_sample_and_seq_pos(a, b)
+    d = error_per_sample_and_seq_pos(b, 0.)
+    return n / (d + 1e-6)
 
 
 def get_oracle_step(task: Task) -> Callable[[Array, Array], Array]:

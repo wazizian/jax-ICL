@@ -65,3 +65,4 @@ hydra:
     params:
       task.distrib_param: 3.0, inf
       training.weight_decay: 0.0, 0.01, 0.1
+      training.lr: 1e-4, 1e-3, 1e-2

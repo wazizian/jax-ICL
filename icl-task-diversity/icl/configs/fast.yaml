@@ -7,8 +7,8 @@ task:
   n_tasks: 0
   n_data: 0
   n_dims: 2
-  n_points: 5
-  n_max_points: 5
+  n_points: 64
+  n_max_points: 64
   batch_size: 8
   data_seed: 101
   task_seed: 102
@@ -24,7 +24,7 @@ task:
 
 model:
   name: single_seq_transformer
-  n_points: 5
+  n_points: 64
   n_layer: 2
   n_embd: 2
   n_head: 2
@@ -47,12 +47,25 @@ eval:
   task_seed: 105
   noise_seed: 106
   every: 1
-  eval_n_points: 4
+  eval_n_points: 64
   task_centers:
+    - 0.
+    - 0.25
+    - 0.5
+    - 0.75
+    - 1.0
+    - 1.25
+    - 1.5
+    - 1.75
     - 2.0
+    - 2.25
+    - 2.5
+    - 2.75
+    - 3.0
+    - 3.25
+    - 3.5
+    - 3.75
     - 4.0
-    - 6.0
-    - 8.0
 
 # Hydra settings
 hydra:

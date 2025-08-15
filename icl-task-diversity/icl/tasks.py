@@ -516,6 +516,7 @@ class OrnsteinUhlenbeckTask:
     curriculum_n_points_increment: int = 2  # Increment for curriculum learning
     curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
     ou_step: float = 1e-2
+    task_n_dims: int | None = None  # Automatically set to 2*n_dims in __post_init__
 
 
     def __post_init__(self):
@@ -523,6 +524,7 @@ class OrnsteinUhlenbeckTask:
         self.data_key = jax.random.PRNGKey(self.data_seed)
         self.task_key = jax.random.PRNGKey(self.task_seed)
         self.noise_key = jax.random.PRNGKey(self.noise_seed)
+        self.task_n_dims = 2 * self.n_dims  # Each task vector has 3*n_dims: mean, decay rate
         self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
         self.task_center = 0.0 if self.task_center is None else self.task_center
         task_pool, weights = self.generate_task_pool() if self.n_tasks > 0 else (None, None)
@@ -538,12 +540,28 @@ class OrnsteinUhlenbeckTask:
         task.task_pool = task_pool
         task.weights = weights
         return task
+    
+    def get_params_from_tasks(self, tasks: Array) -> tuple[Array, Array]:
+        bs = tasks.shape[0]
+        chex.assert_shape(tasks, (bs, self.task_n_dims, 1))
+
+        mu = tasks[:, :self.n_dims, 0]  # Mean of the OU process
+        chex.assert_shape(mu, (bs, self.n_dims))
+
+        # Decay rate, rescaled to (0.05, 0.15)
+        # The higher the tasks values, the slower the decay rate
+        #theta = jnp.tanh(- tasks[:, -self.n_dims:, 0]) * 0.1 + 0.2
+        theta = jax.nn.sigmoid(-0.4 * tasks[:, -self.n_dims:, 0]) * 0.12 + 0.08
+        chex.assert_shape(theta, (bs, self.n_dims))
+
+        return mu, theta
 
     def generate_task_pool(self) -> Array:
         key = jax.random.fold_in(self.task_key, 0)
-        shape = self.n_tasks, 2 * self.n_dims, 1
+        shape = self.n_tasks, self.task_n_dims, 1
         tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                               self.distrib_name, self.distrib_param, shape, self.dtype)
+
         log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                      self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
         #weights = jax.nn.softmax(log_weights, axis=0)
@@ -579,13 +597,13 @@ class OrnsteinUhlenbeckTask:
                                          self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
             weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
-            shape = self.batch_size, 2 * self.n_dims, 1
+            shape = self.batch_size, self.task_n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                                  self.distrib_name, self.distrib_param, shape, self.dtype)
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                          self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
             weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
-        chex.assert_shape(tasks, (self.batch_size, 2 * self.n_dims, 1))
+        chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
         chex.assert_shape(weights, (self.batch_size, 1))
         # jax.debug.print("Weights sum: {}", jnp.sum(weights))
         # jax.debug.print("Batch statistics: tasks min {}, max {}, mean {}",
@@ -594,17 +612,20 @@ class OrnsteinUhlenbeckTask:
 
     @jax.jit
     def evaluate(self, tasks: Array, step: int) -> Array:
-        chex.assert_shape(tasks, (self.batch_size, 2 * self.n_dims, 1))
+        chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
 
-        mu = tasks[:, :self.n_dims, 0]  # Mean of the OU process
+        mu, theta = self.get_params_from_tasks(tasks)
         chex.assert_shape(mu, (self.batch_size, self.n_dims))
-
-        theta = jnp.tanh(0.2 * tasks[:, self.n_dims:, 0])  # Decay rate, rescaled to (-1, 1)
         chex.assert_shape(theta, (self.batch_size, self.n_dims))
 
         key = jax.random.fold_in(self.noise_key, step)
-        all_noise = jax.random.normal(key, (self.n_points, self.batch_size, self.n_dims), self.dtype) * self.noise_scale
-        init = jnp.zeros((self.batch_size, self.n_dims))  # Initial state of the OU process
+        all_noise = jax.random.normal(key, (self.n_points+1, self.batch_size, self.n_dims), self.dtype) * self.noise_scale
+
+        init = all_noise[0, :, :]
+        chex.assert_shape(init, (self.batch_size, self.n_dims))
+
+        all_noise = all_noise[1:, :, :]
+        chex.assert_shape(all_noise, (self.n_points, self.batch_size, self.n_dims))
         
         def ou_step(carry, noise):
             prev_state = carry
@@ -621,7 +642,7 @@ class OrnsteinUhlenbeckTask:
         ou_steps = jnp.transpose(ou_steps, (1, 0, 2))  # Shape: (batch_size, n_points, n_dims)
         chex.assert_shape(ou_steps, (self.batch_size, self.n_points, self.n_dims))
 
-        return ou_steps
+        return init, ou_steps
 
     @jax.jit
     def generate_attention_mask(self) -> Array:
@@ -655,10 +676,21 @@ class OrnsteinUhlenbeckTask:
     def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
             self.curriculum_increment()
+
         (tasks, weights) = self.sample_tasks(step)
-        targets = self.evaluate(tasks, step)
-        data = targets
+        chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
+        chex.assert_shape(weights, (self.batch_size, 1))
+
+        init, targets = self.evaluate(tasks, step)
+        chex.assert_shape(init, (self.batch_size, self.n_dims))
+        chex.assert_shape(targets, (self.batch_size, self.n_points, self.n_dims))
+
+        data = jnp.concatenate((init[:, None, :], targets[:, :-1, :]), axis=1)
+        chex.assert_shape(data, (self.batch_size, self.n_points, self.n_dims))
+
         attention_mask = self.generate_attention_mask()
+        chex.assert_shape(attention_mask, (self.n_max_points, self.n_max_points))
+
         return data, tasks, weights, targets, attention_mask
 
     @jax.jit
@@ -668,16 +700,12 @@ class OrnsteinUhlenbeckTask:
         batch_size = targets.shape[0]
         chex.assert_shape(targets, (batch_size, n_points, self.n_dims))
 
-        init = jnp.zeros((batch_size, self.n_dims))  # Initial state of the OU process
-
-        prev_states = jnp.concatenate((init[:, None, :], data[:, :-1, :]), axis=1)
-        chex.assert_shape(prev_states, (batch_size, n_points, self.n_dims))
-
-        mu = tasks[:, :self.n_dims, 0]  # Mean of the OU process
+        mu, theta = self.get_params_from_tasks(tasks)
         chex.assert_shape(mu, (batch_size, self.n_dims))
-
-        theta = jnp.tanh(0.2 * tasks[:, self.n_dims:, 0])  # Decay rate, rescaled to (-1, 1)
         chex.assert_shape(theta, (batch_size, self.n_dims))
+
+        prev_states = data 
+        chex.assert_shape(prev_states, (batch_size, n_points, self.n_dims))
 
         oracle_states = prev_states + theta[:, None, :] * (mu[:, None, :] - prev_states) * self.ou_step
         chex.assert_shape(oracle_states, (batch_size, n_points, self.n_dims))
@@ -705,6 +733,11 @@ class OrnsteinUhlenbeckTask:
         n_points = eval_n_points
         assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
         config["n_points"] = n_points
+        # Increment seeds
+        config["task_seed"] += 1
+        config["data_seed"] += 1
+        config["noise_seed"] += 1
+
         # Test  with fresh tasks from training distribution
         name = f"Test tasks"
         config["name"] = name
@@ -712,6 +745,11 @@ class OrnsteinUhlenbeckTask:
 
         # Test with same tasks as training distribution
         if self.n_tasks > 0:
+            # Increment seeds
+            config["task_seed"] += 1
+            config["data_seed"] += 1
+            config["noise_seed"] += 1
+
             name = f"Train tasks"
             config["n_tasks"] = self.n_tasks
             config["name"] = name
@@ -723,6 +761,11 @@ class OrnsteinUhlenbeckTask:
         if task_centers is not None:
             config["distrib_name"] = "normal"  # Reset to normal distribution for fixed tasks
             for task_center in task_centers:
+                # Increment seeds
+                config["task_seed"] += 1
+                config["data_seed"] += 1
+                config["noise_seed"] += 1
+
                 config["task_center"] = task_center
                 # config["task_scale"] = 0.
                 config["clip"] = None
@@ -771,6 +814,7 @@ class OrnsteinUhlenbeckTask:
             'curriculum_n_points_increment': self.curriculum_n_points_increment,
             'curriculum_steps_thresh': self.curriculum_steps_thresh,
             'ou_step': self.ou_step,
+            'task_n_dims': self.task_n_dims,
         }
         
         return (children, aux_data)

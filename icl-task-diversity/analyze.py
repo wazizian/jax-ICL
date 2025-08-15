@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 from scipy.optimize import curve_fit
+import itertools
+from matplotlib.colors import LogNorm
+from safetensors.numpy import load_file
 
 
 def get_most_recent_run() -> str:
@@ -66,6 +69,137 @@ def load_log(run_id: str) -> dict:
         return json.load(f)
 
 
+def load_log_with_safetensors(run_path: Path) -> dict:
+    """Load log with optional safetensor speedup for evaluation data.
+    
+    This function is backward compatible:
+    - If safetensor files exist, loads eval data from them (much faster)
+    - Falls back to JSON for everything else or if safetensors don't exist
+    
+    Args:
+        run_path: Path to run directory (e.g., outputs/2025-08-15_10-30-45)
+    
+    Returns:
+        dict: Complete log dictionary with evaluation data
+    """
+    log_path = run_path / "log.json"
+    eval_results_dir = run_path / "eval_results"
+    
+    if not log_path.exists():
+        raise FileNotFoundError(f"Log file not found: {log_path}")
+    
+    # Always load the base log from JSON
+    with open(log_path, "r") as f:
+        log = json.load(f)
+    
+    # Check if safetensor eval results exist and try to use them
+    if eval_results_dir.exists():
+        safetensor_files = sorted(eval_results_dir.glob("eval_step_*.safetensors"))
+        
+        if safetensor_files:
+            print(f"Found {len(safetensor_files)} safetensor eval files, loading for faster analysis...")
+            
+            # Get evaluation steps from log
+            eval_steps = log.get("eval/step", [])
+            
+            # Initialize eval data structure if not present
+            for key in log.keys():
+                if key.startswith("eval/") and key != "eval/step":
+                    for metric_name in log[key].keys():
+                        if isinstance(log[key][metric_name], list):
+                            log[key][metric_name] = []  # Clear existing data
+            
+            # Load data from safetensor files
+            for i, safetensor_file in enumerate(safetensor_files):
+                if i >= len(eval_steps):
+                    break
+                    
+                try:
+                    tensors = load_file(safetensor_file)
+                    
+                    # Convert safetensor data back to log format
+                    for tensor_key, tensor_data in tensors.items():
+                        # Parse tensor key: {task_name}_Transformer_vs_{baseline}_MSE/RelErr
+                        parts = tensor_key.split('_')
+                        if len(parts) < 4:
+                            continue
+                            
+                        # Reconstruct task name and baseline name
+                        transformer_idx = parts.index('Transformer') if 'Transformer' in parts else -1
+                        vs_idx = parts.index('vs') if 'vs' in parts else -1
+                        
+                        if transformer_idx == -1 or vs_idx == -1:
+                            continue
+                            
+                        task_name_parts = parts[:transformer_idx]
+                        baseline_parts = parts[vs_idx+1:]
+                        
+                        # Remove MSE/RelErr suffix
+                        if baseline_parts and (baseline_parts[-1] == 'MSE' or baseline_parts[-1] == 'RelErr'):
+                            metric_type = baseline_parts[-1]
+                            baseline_parts = baseline_parts[:-1]
+                        else:
+                            continue
+                            
+                        # Reconstruct names (convert back from safe names)
+                        task_name = ' '.join(task_name_parts).replace('_', ' ')
+                        baseline_name = ' '.join(baseline_parts).replace('_', ' ')
+                        
+                        # Handle common task name patterns
+                        if 'Fixed_task' in tensor_key:
+                            task_name = task_name.replace('Fixed task', 'Fixed task')
+                        if 'Test_tasks' in tensor_key:
+                            task_name = 'Test tasks'
+                            
+                        # Build log key
+                        log_key = f"eval/{task_name}"
+                        if metric_type == 'RelErr':
+                            metric_key = f"Transformer | {baseline_name} (RelErr)"
+                        else:
+                            metric_key = f"Transformer | {baseline_name}"
+                        
+                        # Initialize structure if needed
+                        if log_key not in log:
+                            log[log_key] = {}
+                        if metric_key not in log[log_key]:
+                            log[log_key][metric_key] = []
+                            
+                        # Append tensor data (convert to list for compatibility)
+                        log[log_key][metric_key].append(tensor_data.tolist())
+                        
+                except Exception as e:
+                    print(f"Warning: Could not load safetensor file {safetensor_file}: {e}")
+                    # Continue with next file or fall back to JSON
+                    
+            print("Successfully loaded evaluation data from safetensors")
+            return log
+    
+    # Fall back to original JSON loading if no safetensors or loading failed
+    print("Using JSON evaluation data (slower)")
+    return log
+
+
+def normalize_error_values(values):
+    """Normalize error values to handle both old and new logging formats.
+    
+    Args:
+        values: Either list of scalars (old format) or list of lists (new format)
+    
+    Returns:
+        List of scalars (averaged over samples if needed)
+    """
+    if not values:
+        return values
+    
+    # Check if this is the new format (list of lists)
+    if isinstance(values[0], list):
+        # New format: average over batch dimension for each position
+        return [np.mean(pos_values) for pos_values in values]
+    else:
+        # Old format: already scalars
+        return values
+
+
 def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
     """Plot training loss over steps."""
     steps = log["train/step"]
@@ -103,7 +237,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
         for metric_name, values in metrics.items():
             if "Transformer |" in metric_name and "(RelErr)" not in metric_name:
                 # MSE metrics (exclude relative error)
-                mean_values = [np.mean(v) for v in values]
+                mean_values = [np.mean(normalize_error_values(v)) for v in values]
                 axes[1].plot(eval_steps, mean_values, 
                         color=colors[color_idx_mse % len(colors)], 
                         linewidth=2,
@@ -115,7 +249,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
         for metric_name, values in metrics.items():
             if "Transformer |" in metric_name and "(RelErr)" not in metric_name:
                 # Calculate min MSE over context length for each training step
-                min_values = [np.min(v) for v in values]
+                min_values = [np.min(normalize_error_values(v)) for v in values]
                 axes[2].plot(eval_steps, min_values, 
                         color=colors[color_idx_rel % len(colors)], 
                         linewidth=2,
@@ -207,7 +341,7 @@ def extract_min_mse_params_for_baseline(log: dict, baseline_type: str) -> tuple[
         if selected_metric:
             metric_name, values = selected_metric
             # Get mean MSE over context length for the last iteration
-            final_step_mse_values = values[final_step_idx]
+            final_step_mse_values = normalize_error_values(values[final_step_idx])
             if final_step_mse_values:
                 mean_mse_over_context = np.mean(final_step_mse_values)
                 min_global_mse = min(final_step_mse_values[1:])
@@ -278,7 +412,7 @@ def extract_power_law_params(log: dict) -> dict:
         if selected_metric:
             metric_name, values = selected_metric
             # Get MSE values for final step
-            mse_values = values[final_step_idx]
+            mse_values = normalize_error_values(values[final_step_idx])
             if not mse_values or len(mse_values) < 3:
                 continue
                 
@@ -351,7 +485,7 @@ def fit_mse_curves_and_compute_metrics(log: dict, run_id: str):
         if selected_metric:
             metric_name, values = selected_metric
             # Get MSE values for final step
-            mse_values = values[final_step_idx]
+            mse_values = normalize_error_values(values[final_step_idx])
             if not mse_values or len(mse_values) < 3:
                 continue
                 
@@ -425,7 +559,7 @@ def print_summary(log: dict, run_id: str):
             metrics_to_show = preferred_metrics if preferred_metrics else fallback_metrics
             
             for metric_name, metric_values in metrics_to_show:
-                final_mse = np.mean(metric_values[-1])
+                final_mse = np.mean(normalize_error_values(metric_values[-1]))
                 print(f"  {metric_name}: {final_mse:.6f}")
 
 
@@ -489,7 +623,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                 for metric_name, values in metrics.items():
                     if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
                         # Get MSE by position for this step
-                        mse_by_position = values[step_idx]  # List of MSE values by position
+                        mse_by_position = normalize_error_values(values[step_idx])  # List of MSE values by position
                         n_points = len(mse_by_position)
                         positions = list(range(1, n_points + 1))  # Context length positions
                         
@@ -522,7 +656,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                 for metric_name, values in metrics.items():
                     if f"Transformer | {baseline_type} (RelErr)" in metric_name and values and step_idx < len(values):
                         # Get Relative Error by position for this step
-                        rel_err_by_position = values[step_idx]  # List of RelErr values by position
+                        rel_err_by_position = normalize_error_values(values[step_idx])  # List of RelErr values by position
                         n_points = len(rel_err_by_position)
                         positions = list(range(1, n_points + 1))  # Context length positions
                         
@@ -1061,10 +1195,9 @@ def analyze_multirun(multirun_id: str, custom_names: list = None):
         display_name = custom_names[i] if custom_names and i < len(custom_names) else subdir_name
         print(f"\n--- Analyzing run {subdir_name} ({display_name}) ---")
         
-        # Load log for this run
-        log_path = multirun_dir / subdir_name / "log.json"
-        with open(log_path, "r") as f:
-            log = json.load(f)
+        # Load log for this run (with safetensor speedup if available)
+        run_path = multirun_dir / subdir_name
+        log = load_log_with_safetensors(run_path)
         
         # Create run identifier for display
         run_display_id = f"{multirun_id}/{display_name}"
@@ -1181,6 +1314,201 @@ def create_run_display_names(multirun_path: Path, run_subdirs: list) -> dict:
     return display_names
 
 
+def hyperparam_analysis(multirun_path: Path, output_dir: Path = None):
+    """Perform hyperparameter analysis: create heatmaps of Test Task MSE vs hyperparameter pairs.
+    
+    For each value of task.distrib_param, creates heatmaps showing average Test Task MSE
+    as a function of pairs of other hyperparameters.
+    
+    Args:
+        multirun_path: Path to the multirun directory
+        output_dir: Directory to save plots (optional)
+    """
+    if not multirun_path.exists():
+        raise FileNotFoundError(f"Multirun directory not found: {multirun_path}")
+    
+    # Get swept parameters
+    swept_params = extract_swept_params(multirun_path)
+    if not swept_params:
+        print("No swept parameters found in multirun.yaml")
+        return
+    
+    print(f"Found swept parameters: {swept_params}")
+    
+    # Find all run subdirectories
+    run_subdirs = []
+    for subdir in multirun_path.iterdir():
+        if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
+            run_subdirs.append(subdir.name)
+    
+    if not run_subdirs:
+        raise FileNotFoundError(f"No completed runs found in multirun")
+    
+    # Sort numerically
+    run_subdirs.sort(key=int)
+    
+    # Collect data from all runs
+    run_data = []  # List of dicts with parameters and MSE
+    
+    for subdir in run_subdirs:
+        config_path = multirun_path / subdir / "config.json"
+        log_path = multirun_path / subdir / "log.json"
+        
+        if not config_path.exists() or not log_path.exists():
+            continue
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Use safetensor loading for faster analysis
+        log = load_log_with_safetensors(subdir)
+        
+        # Extract parameter values
+        param_values = {}
+        for param_path in swept_params:
+            value = get_param_value_from_config(config, param_path)
+            param_values[param_path] = value
+        
+        # Extract Test Task MSE (final iteration, average over context length)
+        test_task_mse = None
+        eval_steps = log.get("eval/step", [])
+        if eval_steps:
+            final_step_idx = -1
+            
+            # Look for Test tasks metrics
+            for key, value in log.items():
+                if key.startswith("eval/Test tasks"):
+                    for metric_name, metric_values in value.items():
+                        if "Transformer |" in metric_name and "(RelErr)" not in metric_name and metric_values:
+                            # Get MSE values for final step
+                            final_mse_values = normalize_error_values(metric_values[final_step_idx])
+                            if final_mse_values:
+                                test_task_mse = np.mean(final_mse_values)
+                                break
+                    if test_task_mse is not None:
+                        break
+        
+        if test_task_mse is not None:
+            param_values['test_task_mse'] = test_task_mse
+            run_data.append(param_values)
+    
+    if not run_data:
+        print("No valid Test Task MSE data found")
+        return
+    
+    print(f"Collected data from {len(run_data)} runs")
+    
+    # Group by task.distrib_param values
+    distrib_param_groups = {}
+    for data in run_data:
+        distrib_param_val = data.get('task.distrib_param')
+        if distrib_param_val is not None:
+            if distrib_param_val not in distrib_param_groups:
+                distrib_param_groups[distrib_param_val] = []
+            distrib_param_groups[distrib_param_val].append(data)
+    
+    if not distrib_param_groups:
+        print("No task.distrib_param found in swept parameters")
+        return
+    
+    # Get other parameters (excluding task.distrib_param)
+    other_params = [p for p in swept_params if p != 'task.distrib_param']
+    
+    if len(other_params) < 2:
+        print(f"Need at least 2 other parameters for heatmap analysis, found: {other_params}")
+        return
+    
+    # Create output directory
+    if output_dir is None:
+        output_dir = multirun_path
+    heatmap_dir = output_dir / "hyperparam_heatmaps"
+    heatmap_dir.mkdir(exist_ok=True)
+    
+    # Generate heatmaps for each distrib_param value and each pair of other parameters
+    for distrib_param_val, group_data in distrib_param_groups.items():
+        print(f"\nProcessing distrib_param = {distrib_param_val} ({len(group_data)} runs)")
+        
+        # Generate all pairs of other parameters
+        param_pairs = list(itertools.combinations(other_params, 2))
+        
+        for param1, param2 in param_pairs:
+            print(f"  Creating heatmap for {param1} vs {param2}")
+            
+            # Extract unique values for each parameter
+            param1_values = sorted(set(data[param1] for data in group_data if param1 in data))
+            param2_values = sorted(set(data[param2] for data in group_data if param2 in data))
+            
+            if len(param1_values) < 2 or len(param2_values) < 2:
+                print(f"    Skipping: insufficient parameter variation ({len(param1_values)} x {len(param2_values)})")
+                continue
+            
+            # Create MSE grid
+            mse_grid = np.full((len(param2_values), len(param1_values)), np.nan)
+            
+            # Fill grid with MSE values
+            for data in group_data:
+                if param1 in data and param2 in data:
+                    try:
+                        i = param1_values.index(data[param1])
+                        j = param2_values.index(data[param2])
+                        mse_grid[j, i] = data['test_task_mse']
+                    except ValueError:
+                        continue
+            
+            # Check if we have enough data points
+            valid_points = np.sum(~np.isnan(mse_grid))
+            if valid_points < 4:
+                print(f"    Skipping: insufficient data points ({valid_points})")
+                continue
+            
+            # Create heatmap
+            plt.figure(figsize=(10, 8))
+            
+            # Use log scale for MSE values
+            valid_mse = mse_grid[~np.isnan(mse_grid)]
+            vmin, vmax = np.min(valid_mse), np.max(valid_mse)
+            
+            im = plt.imshow(mse_grid, aspect='auto', origin='lower', 
+                          norm=LogNorm(vmin=vmin, vmax=vmax), cmap='viridis')
+            
+            # Set ticks and labels
+            plt.xticks(range(len(param1_values)), [str(v) for v in param1_values])
+            plt.yticks(range(len(param2_values)), [str(v) for v in param2_values])
+            
+            # Add colorbar
+            cbar = plt.colorbar(im)
+            cbar.set_label('Test Task MSE (log scale)')
+            
+            # Add text annotations with MSE values
+            for i in range(len(param1_values)):
+                for j in range(len(param2_values)):
+                    if not np.isnan(mse_grid[j, i]):
+                        text_color = 'white' if mse_grid[j, i] < np.exp(np.log(vmin) + 0.7 * (np.log(vmax) - np.log(vmin))) else 'black'
+                        plt.text(i, j, f'{mse_grid[j, i]:.2e}', 
+                               ha='center', va='center', color=text_color, fontsize=8)
+            
+            # Labels and title
+            param1_name = param1.split('.')[-1]
+            param2_name = param2.split('.')[-1]
+            plt.xlabel(f'{param1_name} ({param1})')
+            plt.ylabel(f'{param2_name} ({param2})')
+            plt.title(f'Test Task MSE Heatmap\ndistrib_param={distrib_param_val}\n{param1_name} vs {param2_name}')
+            
+            plt.tight_layout()
+            
+            # Save plot
+            safe_param1 = param1.replace('.', '_')
+            safe_param2 = param2.replace('.', '_')
+            filename = f"heatmap_distrib_{distrib_param_val}_{safe_param1}_vs_{safe_param2}.png"
+            output_path = heatmap_dir / filename
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            print(f"    Saved: {output_path}")
+            
+            plt.close()
+    
+    print(f"\nHyperparameter analysis completed. Heatmaps saved to: {heatmap_dir}")
+
+
 def parse_multirun_args(multirun_arg, run_id_arg):
     """Parse multirun arguments to extract custom names and multirun ID.
     
@@ -1214,6 +1542,7 @@ Examples:
   python analyze.py --multirun 2025-08-11_11-45-46   # Analyze specific multirun
   python analyze.py --multirun "GPT-2,Transformer,LSTM" 2025-08-11_11-45-46   # Custom names
   python analyze.py --multirun --shift-analysis 2025-08-11_11-45-46   # Task shift analysis
+  python analyze.py --multirun --hyperparam-analysis 2025-08-11_11-45-46   # Hyperparameter analysis
         """
     )
     parser.add_argument(
@@ -1232,10 +1561,41 @@ Examples:
         action='store_true',
         help='Perform task shift analysis (alpha and C vs task centers)'
     )
+    parser.add_argument(
+        '--hyperparam-analysis',
+        action='store_true',
+        help='Perform hyperparameter analysis with heatmaps of MSE vs hyperparameter pairs for each distrib_param value'
+    )
     
     args = parser.parse_args()
     
-    if args.shift_analysis:
+    if args.hyperparam_analysis:
+        # Handle hyperparameter analysis
+        if not args.multirun:
+            print("Error: --hyperparam-analysis requires --multirun")
+            return 1
+        
+        multirun_id, custom_names = parse_multirun_args(args.multirun, args.run_id)
+        
+        if multirun_id:
+            pass  # Use provided multirun_id
+        else:
+            try:
+                multirun_id = get_most_recent_multirun()
+                print(f"Using most recent multirun: {multirun_id}")
+            except FileNotFoundError as e:
+                print(f"Error: {e}")
+                return 1
+        
+        # Perform hyperparameter analysis
+        try:
+            multirun_path = Path("outputs/multirun") / multirun_id
+            hyperparam_analysis(multirun_path)
+        except Exception as e:
+            print(f"Error in hyperparameter analysis: {e}")
+            return 1
+            
+    elif args.shift_analysis:
         # Handle distribution shift analysis
         if args.multirun:
             # Distribution analysis for multirun(s)
@@ -1309,7 +1669,9 @@ Examples:
                 print(f"Error: {e}")
                 return 1
         
-        log = load_log(run_id)
+        # Use safetensor loading for single runs too
+        run_path = Path("outputs") / run_id
+        log = load_log_with_safetensors(run_path)
         print_summary(log, run_id)
         fit_mse_curves_and_compute_metrics(log, run_id)
         plot_training_loss(log, run_id)

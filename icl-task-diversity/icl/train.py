@@ -14,9 +14,10 @@ from flax.training.train_state import TrainState
 from jax import Array
 from ml_collections import ConfigDict
 from hydra.core.hydra_config import HydraConfig
+from safetensors.numpy import save_file
 
 import icl.utils as u
-from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_error
+from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_error, error_per_sample_and_seq_pos
 from icl.models import Transformer, SingleSeqTransformer, get_model
 from icl.optim import get_optimizer_and_lr_schedule
 from icl.tasks import Sampler, Task, get_task, get_task_name
@@ -98,10 +99,11 @@ def _init_log(bsln_preds: Preds, n_dims: int) -> dict:
             log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"] = []
             log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"] = []
             if _bsln_name != "True":
-                _errs = mse(_bsln_preds, _task_preds["True"]) / n_dims
-                _rel_errs = relative_error(_bsln_preds, _task_preds["True"])
-                log[f"eval/{_task_name}"][f"{_bsln_name} | True"] = _errs.tolist()
-                log[f"eval/{_task_name}"][f"{_bsln_name} | True (RelErr)"] = _rel_errs.tolist()
+                # Use per-sample errors for consistency with main training loop
+                _errs_per_sample = jnp.mean(jnp.square(_bsln_preds - _task_preds["True"]), axis=1) / n_dims
+                _rel_errs_per_sample = jnp.mean(jnp.square(_bsln_preds - _task_preds["True"]) / (jnp.square(_task_preds["True"]) + 1), axis=1)
+                log[f"eval/{_task_name}"][f"{_bsln_name} | True"] = _errs_per_sample.tolist()
+                log[f"eval/{_task_name}"][f"{_bsln_name} | True (RelErr)"] = _rel_errs_per_sample.tolist()
     return log
 
 
@@ -163,6 +165,10 @@ def train(config: ConfigDict) -> None:
     # Setup checkpoint manager
     ckpt_mngr = ocp.CheckpointManager(exp_dir)
     
+    # Create eval results directory
+    eval_results_dir = exp_dir / "eval_results"
+    eval_results_dir.mkdir(exist_ok=True)
+    
     # Training loop
     logging.info("Start Train Loop")
     train_losses = []
@@ -195,25 +201,49 @@ def train(config: ConfigDict) -> None:
             eval_preds = get_model_preds(
                 state, p_eval_step, j_samplers_eval_batch, config.eval.n_samples, config.eval.batch_size
             )
+            
+            # Prepare tensors for safetensors saving
+            eval_tensors = {}
+            
             # Log and print all evaluation metrics
             log["eval/step"].append(i)
             logging.info("=== Evaluation Metrics ===")
             for _task_name, _task_preds in bsln_preds.items():
                 logging.info(f"Task: {_task_name}")
                 for _bsln_name, _bsln_preds in _task_preds.items():
-                    _errs = mse(eval_preds[_task_name]["Transformer"], _bsln_preds) / config.task.n_dims
+                    _errs = error_per_sample_and_seq_pos(eval_preds[_task_name]["Transformer"], _bsln_preds) / config.task.n_dims
                     _rel_errs = relative_error(eval_preds[_task_name]["Transformer"], _bsln_preds)
                     avg_err = _errs.mean().item()
                     avg_rel_err = _rel_errs.mean().item()
+                    
+                    # Convert to numpy for safetensors (JAX arrays need to be converted)
+                    _errs_np = jnp.asarray(_errs)
+                    _rel_errs_np = jnp.asarray(_rel_errs)
+                    
+                    # Store in tensors dict with safe key names
+                    safe_task_name = _task_name.replace(" ", "_").replace(".", "_")
+                    safe_bsln_name = _bsln_name.replace(" ", "_").replace(".", "_")
+                    tensor_key_mse = f"{safe_task_name}_Transformer_vs_{safe_bsln_name}_MSE"
+                    tensor_key_rel = f"{safe_task_name}_Transformer_vs_{safe_bsln_name}_RelErr"
+                    
+                    eval_tensors[tensor_key_mse] = _errs_np
+                    eval_tensors[tensor_key_rel] = _rel_errs_np
+                    
+                    # Continue with original logging
                     log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
                     log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"].append(_rel_errs.tolist())
                     logging.info(f"  Transformer vs {_bsln_name}: MSE={avg_err:.6f}, RelErr={avg_rel_err:.6f}")
             logging.info("=========================")
+            
+            # Save evaluation results as safetensor file
+            eval_step_file = eval_results_dir / f"eval_step_{i:06d}.safetensors"
+            save_file(eval_tensors, eval_step_file)
+            logging.info(f"Saved evaluation results to: {eval_step_file}")
 
             # Checkpoint - save to Hydra output directory
             ckpt_mngr.save(i, args=ocp.args.StandardSave(jax_utils.unreplicate(state)))
 
-            # Rest last epoch time
+            # Reset last epoch time
             last_epoch_time = time.time()
 
     # Save logs to Hydra output directory
