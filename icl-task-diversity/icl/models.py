@@ -22,6 +22,10 @@ def get_model_name(model):
         return "dMMSE"
     elif isinstance(model, Transformer):
         return "Transformer"
+    elif isinstance(model, SingleSeqTransformer):
+        return "SingleSeqTransformer"
+    elif isinstance(model, LastValue):
+        return "LastValue"
     else:
         raise ValueError(f"model type={type(model)} not supported")
 
@@ -111,29 +115,51 @@ class SingleSeqTransformer(nn.Module):
 
     def __call__(self, data: Array, targets: Array, attention_mask: Array, training: bool = False) -> Array:
         # Batch size
-        batch_size = targets.shape[0]
+        batch_size = data.shape[0]
         # Get actual sequence length before padding
-        actual_seq_len = targets.shape[1]
+        actual_seq_len = data.shape[1]
         # Target features
-        n_target_features = targets.shape[2]
+        n_data_features = data.shape[2]
         
-        chex.assert_shape(targets, (batch_size, actual_seq_len, n_target_features))
+        chex.assert_shape(data, (batch_size, actual_seq_len, n_data_features))
         
         # Pad input sequence to match the model's expected block_size
-        target_seq_len = self.n_points  # Expected number of data points
+        data_seq_len = self.n_points  # Expected number of data points
 
         chex.assert_shape(attention_mask, (batch_size, self.n_points, self.n_points))
 
-        input_seq = u.pad_sequence(targets, target_seq_len=target_seq_len)
-        chex.assert_shape(input_seq, (batch_size, self.n_points, n_target_features))
+        input_seq = u.pad_sequence(data, target_seq_len=data_seq_len)
+        chex.assert_shape(input_seq, (batch_size, self.n_points, n_data_features))
 
         embds = self._in(input_seq)
         outputs = self._h(input_embds=embds, attention_mask=attention_mask, training=training)
         preds = self._out(outputs)
-        chex.assert_shape(preds, (batch_size, self.n_points, n_target_features))
+        chex.assert_shape(preds, (batch_size, self.n_points, n_data_features))
 
         preds = u.unpad_sequence(preds, actual_seq_len=actual_seq_len)
-        chex.assert_shape(preds, (batch_size, actual_seq_len, n_target_features))
+        chex.assert_shape(preds, (batch_size, actual_seq_len, n_data_features))
+
+        return preds
+
+class LastValue(nn.Module):
+    """
+    A simple model that returns the last value of the input sequence.
+    This is useful for tasks where the last value is the target.
+    """
+
+    def __call__(self, data: Array, targets: Array) -> Array:
+        """
+        Args:
+            data: batch_size x n_points x n_dims (float)
+            targets: batch_size x n_points x n_dims (float)
+        Return:
+            batch_size x n_points x n_dims (float)
+        """
+        batch_size, n_points, n_dims = targets.shape
+
+        init = jnp.zeros((batch_size, 1, n_dims), dtype=targets.dtype)
+        preds = jnp.concatenate([init, targets[:, :-1, :]], axis=1)  # batch_size x n_points x n_dims
+        chex.assert_shape(preds, (batch_size, n_points, n_dims))
 
         return preds
 
@@ -244,5 +270,5 @@ Model = Transformer | Ridge | DiscreteMMSE
 
 
 def get_model(name: str, **kwargs) -> Model:
-    models = {"transformer": Transformer, "ridge": Ridge, "discrete_mmse": DiscreteMMSE, "single_seq_transformer": SingleSeqTransformer}
+    models = {"transformer": Transformer, "ridge": Ridge, "discrete_mmse": DiscreteMMSE, "single_seq_transformer": SingleSeqTransformer, "last_value": LastValue}
     return models[name](**kwargs)

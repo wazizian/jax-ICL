@@ -1,6 +1,7 @@
 dtype: float32
 output_dir: ./outputs
 log_level: INFO
+add_seed: 0
 
 task:
   name: ornstein_uhlenbeck
@@ -33,10 +34,10 @@ model:
 
 training:
   optimizer: adamw
-  lr: 1.0e-2
+  lr: 1.0e-1
   schedule: warmup_cosine_decay
   warmup_steps: 50
-  total_steps: 200
+  total_steps: 5000
   weight_decay: 0.01
 
 eval:
@@ -45,7 +46,7 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 25
+  every: 1000
   eval_n_points: 4
   task_centers:
     - 2.0

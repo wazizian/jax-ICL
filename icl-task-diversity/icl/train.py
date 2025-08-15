@@ -114,6 +114,13 @@ def train(config: ConfigDict) -> None:
     exp_name = f"train_{u.get_hash(config)}"
     
     logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\n")
+
+    for key, value in config.items():
+        if isinstance(value, ConfigDict):
+            for sub_key, sub_value in value.items():
+                if "seed" in sub_key:
+                    logging.info(f"Updated {key}.{sub_key} to {sub_value + config.add_seed}")
+                    config[key][sub_key] += config.add_seed
     
     # Validate config 
     assert config.model.n_points == config.task.n_max_points, "Model n_points must match Task n_max_points"
@@ -230,18 +237,24 @@ def train(config: ConfigDict) -> None:
                     eval_tensors[tensor_key_rel] = _rel_errs_np
                     
                     # Continue with original logging
-                    log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
-                    log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"].append(_rel_errs.tolist())
+                    # log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
+                    # log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"].append(_rel_errs.tolist())
+
                     logging.info(f"  Transformer vs {_bsln_name}: MSE={avg_err:.6f}, RelErr={avg_rel_err:.6f}")
-            logging.info("=========================")
             
             # Save evaluation results as safetensor file
             eval_step_file = eval_results_dir / f"eval_step_{i:06d}.safetensors"
             save_file(eval_tensors, eval_step_file)
             logging.info(f"Saved evaluation results to: {eval_step_file}")
 
+            # Save logs to Hydra output directory
+            with open(exp_dir / "log.json", "w") as f:
+                json.dump(log, f, indent=2)
+            logging.info("Saved logs to Hydra output directory")
+
             # Checkpoint - save to Hydra output directory
             ckpt_mngr.save(i, args=ocp.args.StandardSave(jax_utils.unreplicate(state)))
+            logging.info("=========================")
 
             # Reset last epoch time
             last_epoch_time = time.time()

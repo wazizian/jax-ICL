@@ -16,6 +16,7 @@ from scipy.optimize import curve_fit
 import itertools
 from matplotlib.colors import LogNorm
 from safetensors.numpy import load_file
+import re
 
 
 def get_most_recent_run() -> str:
@@ -84,7 +85,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
     """
     log_path = run_path / "log.json"
     eval_results_dir = run_path / "eval_results"
-    
+
     if not log_path.exists():
         raise FileNotFoundError(f"Log file not found: {log_path}")
     
@@ -102,14 +103,15 @@ def load_log_with_safetensors(run_path: Path) -> dict:
             # Get evaluation steps from log
             eval_steps = log.get("eval/step", [])
             
-            # Initialize eval data structure if not present
+            # Initialize eval data structure - prepare empty lists for each metric
+            eval_data = {}
             for key in log.keys():
                 if key.startswith("eval/") and key != "eval/step":
+                    eval_data[key] = {}
                     for metric_name in log[key].keys():
-                        if isinstance(log[key][metric_name], list):
-                            log[key][metric_name] = []  # Clear existing data
+                        eval_data[key][metric_name] = []
             
-            # Load data from safetensor files
+            # Load data from safetensor files in order
             for i, safetensor_file in enumerate(safetensor_files):
                 if i >= len(eval_steps):
                     break
@@ -119,39 +121,40 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                     
                     # Convert safetensor data back to log format
                     for tensor_key, tensor_data in tensors.items():
-                        # Parse tensor key: {task_name}_Transformer_vs_{baseline}_MSE/RelErr
-                        parts = tensor_key.split('_')
-                        if len(parts) < 4:
-                            continue
-                            
-                        # Reconstruct task name and baseline name
-                        transformer_idx = parts.index('Transformer') if 'Transformer' in parts else -1
-                        vs_idx = parts.index('vs') if 'vs' in parts else -1
+                        # Parse tensor key more carefully
+                        # Expected format: {task_name}_Transformer_vs_{baseline}_MSE/RelErr
                         
-                        if transformer_idx == -1 or vs_idx == -1:
-                            continue
-                            
-                        task_name_parts = parts[:transformer_idx]
-                        baseline_parts = parts[vs_idx+1:]
-                        
-                        # Remove MSE/RelErr suffix
-                        if baseline_parts and (baseline_parts[-1] == 'MSE' or baseline_parts[-1] == 'RelErr'):
-                            metric_type = baseline_parts[-1]
-                            baseline_parts = baseline_parts[:-1]
+                        # Find metric type (MSE or RelErr)
+                        if tensor_key.endswith('_MSE'):
+                            metric_type = 'MSE'
+                            base_key = tensor_key[:-4]  # Remove '_MSE'
+                        elif tensor_key.endswith('_RelErr'):
+                            metric_type = 'RelErr'
+                            base_key = tensor_key[:-7]  # Remove '_RelErr'
                         else:
                             continue
-                            
-                        # Reconstruct names (convert back from safe names)
-                        task_name = ' '.join(task_name_parts).replace('_', ' ')
-                        baseline_name = ' '.join(baseline_parts).replace('_', ' ')
                         
-                        # Handle common task name patterns
-                        if 'Fixed_task' in tensor_key:
-                            task_name = task_name.replace('Fixed task', 'Fixed task')
-                        if 'Test_tasks' in tensor_key:
-                            task_name = 'Test tasks'
+                        # Split by '_Transformer_vs_' to separate task from baseline
+                        if '_Transformer_vs_' not in base_key:
+                            continue
                             
-                        # Build log key
+                        task_part, baseline_part = base_key.split('_Transformer_vs_', 1)
+                        
+                        # Reconstruct names by replacing underscores with spaces
+                        task_name = task_part.replace('_', ' ')
+                        task_name = re.sub(r"(\d+)\s+(\d+)", r"\1.\2", task_name)
+
+                        baseline_name = baseline_part.replace('_', ' ')
+                        baseline_name = re.sub(r"(\d+)\s+(\d+)", r"\1.\2", baseline_name)
+                        
+                        # Handle special cases
+                        if task_name.startswith('Test tasks'):
+                            task_name = 'Test tasks'
+                        elif task_name.startswith('Fixed task'):
+                            # Keep the number part for Fixed task
+                            pass
+                            
+                        # Build log key and metric key
                         log_key = f"eval/{task_name}"
                         if metric_type == 'RelErr':
                             metric_key = f"Transformer | {baseline_name} (RelErr)"
@@ -159,17 +162,30 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                             metric_key = f"Transformer | {baseline_name}"
                         
                         # Initialize structure if needed
-                        if log_key not in log:
-                            log[log_key] = {}
-                        if metric_key not in log[log_key]:
-                            log[log_key][metric_key] = []
+                        if log_key not in eval_data:
+                            eval_data[log_key] = {}
+                        if metric_key not in eval_data[log_key]:
+                            eval_data[log_key][metric_key] = []
                             
-                        # Append tensor data (convert to list for compatibility)
-                        log[log_key][metric_key].append(tensor_data.tolist())
+                        # Store tensor data (will be appended in order for each step)
+                        # For now, just mark that we have data for this step
+                        while len(eval_data[log_key][metric_key]) <= i:
+                            eval_data[log_key][metric_key].append(None)
+                        eval_data[log_key][metric_key][i] = tensor_data.tolist()
                         
                 except Exception as e:
                     print(f"Warning: Could not load safetensor file {safetensor_file}: {e}")
-                    # Continue with next file or fall back to JSON
+                    # Fall back to JSON for this file
+                    
+            # Update log with loaded eval data, filtering out None values
+            for log_key, metrics in eval_data.items():
+                if log_key not in log:
+                    log[log_key] = {}
+                for metric_key, values in metrics.items():
+                    # Filter out None values and ensure we have data
+                    filtered_values = [v for v in values if v is not None]
+                    if filtered_values:
+                        log[log_key][metric_key] = filtered_values
                     
             print("Successfully loaded evaluation data from safetensors")
             return log
@@ -190,11 +206,15 @@ def normalize_error_values(values):
     """
     if not values:
         return values
-    
-    # Check if this is the new format (list of lists)
-    if isinstance(values[0], list):
+
+    if not isinstance(values, np.ndarray):
+        # Convert to numpy array for easier handling
+        values = np.array(values)
+    if values.ndim == 2:
         # New format: average over batch dimension for each position
-        return [np.mean(pos_values) for pos_values in values]
+        return np.mean(values, axis=0)
+    elif values.ndim == 1:
+        return values
     else:
         # Old format: already scalars
         return values
@@ -342,7 +362,7 @@ def extract_min_mse_params_for_baseline(log: dict, baseline_type: str) -> tuple[
             metric_name, values = selected_metric
             # Get mean MSE over context length for the last iteration
             final_step_mse_values = normalize_error_values(values[final_step_idx])
-            if final_step_mse_values:
+            if final_step_mse_values is not None and len(final_step_mse_values) > 0:
                 mean_mse_over_context = np.mean(final_step_mse_values)
                 min_global_mse = min(final_step_mse_values[1:])
             else:
@@ -413,7 +433,7 @@ def extract_power_law_params(log: dict) -> dict:
             metric_name, values = selected_metric
             # Get MSE values for final step
             mse_values = normalize_error_values(values[final_step_idx])
-            if not mse_values or len(mse_values) < 3:
+            if mse_values is None or len(mse_values) < 3:
                 continue
                 
             k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
@@ -486,7 +506,7 @@ def fit_mse_curves_and_compute_metrics(log: dict, run_id: str):
             metric_name, values = selected_metric
             # Get MSE values for final step
             mse_values = normalize_error_values(values[final_step_idx])
-            if not mse_values or len(mse_values) < 3:
+            if mse_values is None or len(mse_values) < 3:
                 continue
                 
             k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
@@ -719,13 +739,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
         # Check if this is a multirun directory or single run
         if (run_path / "multirun.yaml").exists():
             # This is a multirun directory - we want to analyze each subrun separately
-            subdirs = []
-            for subdir in run_path.iterdir():
-                if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
-                    subdirs.append(subdir)
-            
-            # Sort numerically
-            subdirs.sort(key=lambda x: int(x.name))
+            subdirs = find_valid_multirun_subdirs(run_path, return_paths=True)
             
             # Extract parameter names from multirun.yaml if no custom labels provided
             if run_labels is None:
@@ -744,8 +758,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
                 
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                with open(log_path, 'r') as f:
-                    log = json.load(f)
+                log = load_log_with_safetensors(subdir)
                 
                 # Extract task centers from config
                 task_centers = config.get('eval', {}).get('task_centers', [])
@@ -786,8 +799,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
             
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            with open(log_path, 'r') as f:
-                log = json.load(f)
+            log = load_log_with_safetensors(run_path)
             
             # Extract task centers from config
             task_centers = config.get('eval', {}).get('task_centers', [])
@@ -927,13 +939,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             # Check if this is a multirun directory or single run
             if (run_path / "multirun.yaml").exists():
                 # This is a multirun directory - we want to analyze each subrun separately
-                subdirs = []
-                for subdir in run_path.iterdir():
-                    if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
-                        subdirs.append(subdir)
-                
-                # Sort numerically
-                subdirs.sort(key=lambda x: int(x.name))
+                subdirs = find_valid_multirun_subdirs(run_path, return_paths=True)
                 
                 # Extract parameter names from multirun.yaml if no custom labels provided
                 if run_labels is None:
@@ -952,8 +958,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                     
                     with open(config_path, 'r') as f:
                         config = json.load(f)
-                    with open(log_path, 'r') as f:
-                        log = json.load(f)
+                    log = load_log_with_safetensors(subdir)
                     
                     # Extract task centers from config
                     task_centers = config.get('eval', {}).get('task_centers', [])
@@ -1000,8 +1005,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 
                 with open(config_path, 'r') as f:
                     config = json.load(f)
-                with open(log_path, 'r') as f:
-                    log = json.load(f)
+                log = load_log_with_safetensors(run_path)
                 
                 # Extract task centers from config
                 task_centers = config.get('eval', {}).get('task_centers', [])
@@ -1169,17 +1173,11 @@ def analyze_multirun(multirun_id: str, custom_names: list = None):
     if not multirun_dir.exists():
         raise FileNotFoundError(f"Multirun directory not found: {multirun_dir}")
     
-    # Find all subdirectories with log.json files
-    run_subdirs = []
-    for subdir in multirun_dir.iterdir():
-        if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
-            run_subdirs.append(subdir.name)
+    # Find all valid subdirectories with log.json files or safetensor files
+    run_subdirs = find_valid_multirun_subdirs(multirun_dir)
     
     if not run_subdirs:
         raise FileNotFoundError(f"No completed runs found in multirun {multirun_id}")
-    
-    # Sort subdirectories numerically
-    run_subdirs.sort(key=int)
     
     # Extract parameter names from multirun.yaml if custom names not provided
     if custom_names is None:
@@ -1314,6 +1312,35 @@ def create_run_display_names(multirun_path: Path, run_subdirs: list) -> dict:
     return display_names
 
 
+def find_valid_multirun_subdirs(multirun_path: Path, return_paths: bool = False) -> list:
+    """Find all valid subdirectories in a multirun that have either log.json or safetensor files.
+    
+    Args:
+        multirun_path: Path to the multirun directory
+        return_paths: If True, return Path objects; if False, return strings (default)
+        
+    Returns:
+        list: List of subdirectory names (as strings) or Path objects, sorted numerically
+    """
+    subdirs = []
+    for subdir in multirun_path.iterdir():
+        if subdir.is_dir() and subdir.name.isdigit():
+            has_log = (subdir / "log.json").exists()
+            has_safetensors = (subdir / "eval_results").exists() and any((subdir / "eval_results").glob("eval_step_*.safetensors"))
+            if has_log or has_safetensors:
+                if return_paths:
+                    subdirs.append(subdir)
+                else:
+                    subdirs.append(subdir.name)
+    
+    # Sort numerically
+    if return_paths:
+        subdirs.sort(key=lambda x: int(x.name))
+    else:
+        subdirs.sort(key=int)
+    return subdirs
+
+
 def hyperparam_analysis(multirun_path: Path, output_dir: Path = None):
     """Perform hyperparameter analysis: create heatmaps of Test Task MSE vs hyperparameter pairs.
     
@@ -1335,17 +1362,11 @@ def hyperparam_analysis(multirun_path: Path, output_dir: Path = None):
     
     print(f"Found swept parameters: {swept_params}")
     
-    # Find all run subdirectories
-    run_subdirs = []
-    for subdir in multirun_path.iterdir():
-        if subdir.is_dir() and subdir.name.isdigit() and (subdir / "log.json").exists():
-            run_subdirs.append(subdir.name)
+    # Find all valid run subdirectories
+    run_subdirs = find_valid_multirun_subdirs(multirun_path)
     
     if not run_subdirs:
         raise FileNotFoundError(f"No completed runs found in multirun")
-    
-    # Sort numerically
-    run_subdirs.sort(key=int)
     
     # Collect data from all runs
     run_data = []  # List of dicts with parameters and MSE
@@ -1361,7 +1382,8 @@ def hyperparam_analysis(multirun_path: Path, output_dir: Path = None):
             config = json.load(f)
         
         # Use safetensor loading for faster analysis
-        log = load_log_with_safetensors(subdir)
+        subdir_path = multirun_path / subdir
+        log = load_log_with_safetensors(subdir_path)
         
         # Extract parameter values
         param_values = {}
@@ -1369,31 +1391,34 @@ def hyperparam_analysis(multirun_path: Path, output_dir: Path = None):
             value = get_param_value_from_config(config, param_path)
             param_values[param_path] = value
         
-        # Extract Test Task MSE (final iteration, average over context length)
-        test_task_mse = None
+        # Extract MSE for all tasks (final iteration, average over context length)
+        task_mses = {}
         eval_steps = log.get("eval/step", [])
         if eval_steps:
             final_step_idx = -1
             
-            # Look for Test tasks metrics
+            # Look for all task metrics (Test tasks, Fixed tasks)
             for key, value in log.items():
-                if key.startswith("eval/Test tasks"):
+                if key.startswith("eval/") and key != "eval/step":
+                    task_name = key.split("/")[1]  # Extract task name from "eval/Task Name"
+                    
                     for metric_name, metric_values in value.items():
                         if "Transformer |" in metric_name and "(RelErr)" not in metric_name and metric_values:
                             # Get MSE values for final step
                             final_mse_values = normalize_error_values(metric_values[final_step_idx])
-                            if final_mse_values:
-                                test_task_mse = np.mean(final_mse_values)
-                                break
-                    if test_task_mse is not None:
-                        break
+                            if final_mse_values is not None and len(final_mse_values) > 0:
+                                task_mse = np.mean(final_mse_values)
+                                task_mses[task_name] = task_mse
+                                break  # Take the first available MSE metric for this task
         
-        if test_task_mse is not None:
-            param_values['test_task_mse'] = test_task_mse
+        if task_mses:
+            # Add all task MSEs to param_values
+            for task_name, mse_value in task_mses.items():
+                param_values[f'{task_name}_mse'] = mse_value
             run_data.append(param_values)
     
     if not run_data:
-        print("No valid Test Task MSE data found")
+        print("No valid task MSE data found")
         return
     
     print(f"Collected data from {len(run_data)} runs")
@@ -1424,87 +1449,108 @@ def hyperparam_analysis(multirun_path: Path, output_dir: Path = None):
     heatmap_dir = output_dir / "hyperparam_heatmaps"
     heatmap_dir.mkdir(exist_ok=True)
     
-    # Generate heatmaps for each distrib_param value and each pair of other parameters
+    # Get all available task names from the data
+    all_task_names = set()
+    for data in run_data:
+        for key in data.keys():
+            if key.endswith('_mse'):
+                task_name = key[:-4]  # Remove '_mse' suffix
+                all_task_names.add(task_name)
+    
+    print(f"Found tasks: {sorted(all_task_names)}")
+    
+    # Generate heatmaps for each distrib_param value, each task, and each pair of other parameters
     for distrib_param_val, group_data in distrib_param_groups.items():
         print(f"\nProcessing distrib_param = {distrib_param_val} ({len(group_data)} runs)")
         
         # Generate all pairs of other parameters
         param_pairs = list(itertools.combinations(other_params, 2))
         
-        for param1, param2 in param_pairs:
-            print(f"  Creating heatmap for {param1} vs {param2}")
+        for task_name in sorted(all_task_names):
+            task_mse_key = f'{task_name}_mse'
             
-            # Extract unique values for each parameter
-            param1_values = sorted(set(data[param1] for data in group_data if param1 in data))
-            param2_values = sorted(set(data[param2] for data in group_data if param2 in data))
-            
-            if len(param1_values) < 2 or len(param2_values) < 2:
-                print(f"    Skipping: insufficient parameter variation ({len(param1_values)} x {len(param2_values)})")
+            # Check if this task has data in this distrib_param group
+            has_task_data = any(task_mse_key in data for data in group_data)
+            if not has_task_data:
                 continue
+                
+            print(f"  Creating heatmaps for task: {task_name}")
             
-            # Create MSE grid
-            mse_grid = np.full((len(param2_values), len(param1_values)), np.nan)
-            
-            # Fill grid with MSE values
-            for data in group_data:
-                if param1 in data and param2 in data:
-                    try:
-                        i = param1_values.index(data[param1])
-                        j = param2_values.index(data[param2])
-                        mse_grid[j, i] = data['test_task_mse']
-                    except ValueError:
-                        continue
-            
-            # Check if we have enough data points
-            valid_points = np.sum(~np.isnan(mse_grid))
-            if valid_points < 4:
-                print(f"    Skipping: insufficient data points ({valid_points})")
-                continue
-            
-            # Create heatmap
-            plt.figure(figsize=(10, 8))
-            
-            # Use log scale for MSE values
-            valid_mse = mse_grid[~np.isnan(mse_grid)]
-            vmin, vmax = np.min(valid_mse), np.max(valid_mse)
-            
-            im = plt.imshow(mse_grid, aspect='auto', origin='lower', 
-                          norm=LogNorm(vmin=vmin, vmax=vmax), cmap='viridis')
-            
-            # Set ticks and labels
-            plt.xticks(range(len(param1_values)), [str(v) for v in param1_values])
-            plt.yticks(range(len(param2_values)), [str(v) for v in param2_values])
-            
-            # Add colorbar
-            cbar = plt.colorbar(im)
-            cbar.set_label('Test Task MSE (log scale)')
-            
-            # Add text annotations with MSE values
-            for i in range(len(param1_values)):
-                for j in range(len(param2_values)):
-                    if not np.isnan(mse_grid[j, i]):
-                        text_color = 'white' if mse_grid[j, i] < np.exp(np.log(vmin) + 0.7 * (np.log(vmax) - np.log(vmin))) else 'black'
-                        plt.text(i, j, f'{mse_grid[j, i]:.2e}', 
-                               ha='center', va='center', color=text_color, fontsize=8)
-            
-            # Labels and title
-            param1_name = param1.split('.')[-1]
-            param2_name = param2.split('.')[-1]
-            plt.xlabel(f'{param1_name} ({param1})')
-            plt.ylabel(f'{param2_name} ({param2})')
-            plt.title(f'Test Task MSE Heatmap\ndistrib_param={distrib_param_val}\n{param1_name} vs {param2_name}')
-            
-            plt.tight_layout()
-            
-            # Save plot
-            safe_param1 = param1.replace('.', '_')
-            safe_param2 = param2.replace('.', '_')
-            filename = f"heatmap_distrib_{distrib_param_val}_{safe_param1}_vs_{safe_param2}.png"
-            output_path = heatmap_dir / filename
-            plt.savefig(output_path, dpi=150, bbox_inches='tight')
-            print(f"    Saved: {output_path}")
-            
-            plt.close()
+            for param1, param2 in param_pairs:
+                print(f"    {param1} vs {param2}")
+                
+                # Extract unique values for each parameter
+                param1_values = sorted(set(data[param1] for data in group_data if param1 in data))
+                param2_values = sorted(set(data[param2] for data in group_data if param2 in data))
+                
+                if len(param1_values) < 2 or len(param2_values) < 2:
+                    print(f"      Skipping: insufficient parameter variation ({len(param1_values)} x {len(param2_values)})")
+                    continue
+                
+                # Create MSE grid
+                mse_grid = np.full((len(param2_values), len(param1_values)), np.nan)
+                
+                # Fill grid with MSE values for this specific task
+                for data in group_data:
+                    if param1 in data and param2 in data and task_mse_key in data:
+                        try:
+                            i = param1_values.index(data[param1])
+                            j = param2_values.index(data[param2])
+                            mse_grid[j, i] = data[task_mse_key]
+                        except ValueError:
+                            continue
+                
+                # Check if we have enough data points
+                valid_points = np.sum(~np.isnan(mse_grid))
+                if valid_points < 4:
+                    print(f"      Skipping: insufficient data points ({valid_points})")
+                    continue
+                
+                # Create heatmap
+                plt.figure(figsize=(10, 8))
+                
+                # Use log scale for MSE values
+                valid_mse = mse_grid[~np.isnan(mse_grid)]
+                vmin, vmax = np.min(valid_mse), np.max(valid_mse)
+                
+                im = plt.imshow(mse_grid, aspect='auto', origin='lower', 
+                              norm=LogNorm(vmin=vmin, vmax=vmax), cmap='viridis')
+                
+                # Set ticks and labels
+                plt.xticks(range(len(param1_values)), [str(v) for v in param1_values])
+                plt.yticks(range(len(param2_values)), [str(v) for v in param2_values])
+                
+                # Add colorbar
+                cbar = plt.colorbar(im)
+                cbar.set_label(f'{task_name} MSE (log scale)')
+                
+                # Add text annotations with MSE values
+                for i in range(len(param1_values)):
+                    for j in range(len(param2_values)):
+                        if not np.isnan(mse_grid[j, i]):
+                            text_color = 'white' if mse_grid[j, i] < np.exp(np.log(vmin) + 0.7 * (np.log(vmax) - np.log(vmin))) else 'black'
+                            plt.text(i, j, f'{mse_grid[j, i]:.2e}', 
+                                   ha='center', va='center', color=text_color, fontsize=8)
+                
+                # Labels and title
+                param1_name = param1.split('.')[-1]
+                param2_name = param2.split('.')[-1]
+                plt.xlabel(f'{param1_name} ({param1})')
+                plt.ylabel(f'{param2_name} ({param2})')
+                plt.title(f'{task_name} MSE Heatmap\ndistrib_param={distrib_param_val}\n{param1_name} vs {param2_name}')
+                
+                plt.tight_layout()
+                
+                # Save plot
+                safe_param1 = param1.replace('.', '_')
+                safe_param2 = param2.replace('.', '_')
+                safe_task_name = task_name.replace(' ', '_').replace('.', '_')
+                filename = f"heatmap_{safe_task_name}_distrib_{distrib_param_val}_{safe_param1}_vs_{safe_param2}.png"
+                output_path = heatmap_dir / filename
+                plt.savefig(output_path, dpi=150, bbox_inches='tight')
+                print(f"      Saved: {output_path}")
+                
+                plt.close()
     
     print(f"\nHyperparameter analysis completed. Heatmaps saved to: {heatmap_dir}")
 
@@ -1593,6 +1639,7 @@ Examples:
             hyperparam_analysis(multirun_path)
         except Exception as e:
             print(f"Error in hyperparameter analysis: {e}")
+            raise e
             return 1
             
     elif args.shift_analysis:
@@ -1630,7 +1677,8 @@ Examples:
         
         # Perform task shift analysis
         try:
-            plot_task_shift_analysis(run_paths, run_labels=custom_names)
+            # Not used anymore
+            # plot_task_shift_analysis(run_paths, run_labels=custom_names)
             plot_min_mse_analysis(run_paths, run_labels=custom_names)
         except Exception as e:
             print(f"Error in task shift analysis: {e}")

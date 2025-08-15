@@ -551,7 +551,7 @@ class OrnsteinUhlenbeckTask:
         # Decay rate, rescaled to (0.05, 0.15)
         # The higher the tasks values, the slower the decay rate
         #theta = jnp.tanh(- tasks[:, -self.n_dims:, 0]) * 0.1 + 0.2
-        theta = jax.nn.sigmoid(-0.4 * tasks[:, -self.n_dims:, 0]) * 0.12 + 0.08
+        theta = jax.nn.sigmoid(-0.4 * tasks[:, -self.n_dims:, 0]) * 0.2 + 0.3
         chex.assert_shape(theta, (bs, self.n_dims))
 
         return mu, theta
@@ -775,7 +775,7 @@ class OrnsteinUhlenbeckTask:
         return eval_tasks
 
     def get_default_eval_models(self) -> list[Model]:
-        return []
+        return [get_model(name="last_value")]
 
     def _tree_flatten(self):
         # Dynamic values (arrays, keys, and values that can change)

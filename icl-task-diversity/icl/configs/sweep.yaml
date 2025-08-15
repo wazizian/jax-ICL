@@ -4,13 +4,12 @@ log_level: INFO
 add_seed: 0
 
 task:
-  name: ornstein_uhlenbeck
+  name: noisy_linear_regression
   n_tasks: 0
   n_data: 0
-  n_dims: 8 
-  n_points: 32
-  n_max_points: 32
-  use_curriculum: false
+  n_dims: 8
+  n_points: 128
+  n_max_points: 128
   batch_size: 256
   data_seed: 101
   task_seed: 102
@@ -20,29 +19,27 @@ task:
   noise_scale: 0.5
   clip: null
   use_weights: false
-  eval_ridge: false
+  eval_ridge: true
   distrib_name: student
   distrib_param: .inf
-  ou_step: 0.8
 
 model:
-  name: single_seq_transformer
-  n_points: 32
+  name: transformer
+  n_points: 128
   n_layer: 8
-  n_embd: 128
-  n_head: 2
+  n_embd: 32
+  n_head: 8
   seed: 100
   use_ln: true
   use_linear_attention: false
-  n_out: 8
 
 training:
   optimizer: adamw
   lr: 2.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 50_000
-  total_steps: 400_000
-  weight_decay: 0.1
+  total_steps: 500_000
+  weight_decay: 0.0
 
 eval:
   n_samples: 2048
@@ -50,8 +47,8 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 20_000
-  eval_n_points: 32
+  every: 25_000
+  eval_n_points: 128
   task_centers:
     - 0.
     - 0.25
@@ -74,6 +71,9 @@ eval:
 # Hydra settings
 hydra:
   mode: MULTIRUN
+  callbacks:
+    save_job_info:
+      _target_: hydra.experimental.callbacks.PickleJobInfoCallback
   run:
     dir: ${output_dir}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
@@ -82,4 +82,7 @@ hydra:
   sweeper:
     params:
       task.distrib_param: inf, 3.0, 5.0, 10.0
-      training.lr: 1e-3 #, 1e-2
+      training.weight_decay: 0.01
+      training.lr: 1e-3, 2e-3
+      add_seed: 3
+
