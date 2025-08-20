@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import time
+import optax
 
 import jax
 import jax.numpy as jnp
@@ -21,6 +22,7 @@ from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_e
 from icl.models import Transformer, SingleSeqTransformer, get_model
 from icl.optim import get_optimizer_and_lr_schedule
 from icl.tasks import Sampler, Task, get_task, get_task_name
+from icl.reweighting import process_log_weights
 
 
 def initialize(model: Transformer | SingleSeqTransformer, config: ConfigDict) -> tuple[FrozenDict, Array]:
@@ -66,24 +68,51 @@ def get_sharded_batch_sampler(task: Task) -> Sampler:
     return sample_batch
 
 
-def train_step(state: TrainState, data: Array, weights: Array, targets: Array, attention_mask: Array, dropout_rng: Array) -> tuple[Array, TrainState]:
+def train_step(state: TrainState,
+               data: Array,
+               log_weights: Array,
+               targets: Array,
+               attention_mask: Array,
+               dropout_rng: Array,
+               t: int,
+               T: int,
+               alpha0: float,
+               T_ramp_ratio: float,
+               use_weights:bool,
+               clip_max_norm: float
+               ) -> tuple[Array, TrainState]:
+
     dropout_rng = jr.fold_in(dropout_rng, state.step + 1)
 
-    def loss_fn(params):
+    if not use_weights:
+        log_weights = jnp.zeros(data.shape[0], dtype=jnp.float32)
+
+    weights, diagnostics = process_log_weights(
+        log_weights, t, T, alpha0=alpha0, T_ramp_ratio=T_ramp_ratio
+        )
+
+    def loss_fn(params, weights):
         preds = state.apply_fn({"params": params}, data, targets, attention_mask, training=True, rngs={"dropout": dropout_rng})
         # Compute weighted loss: weights should have shape (batch_size,)
         batch_losses = jnp.square(preds - targets).mean(axis=1)  # Mean over sequence length
         # jax.debug.print("Weights: mean={}, median={}, min={}, max={}",
         #                jnp.mean(weights), jnp.median(weights), jnp.min(weights), jnp.max(weights))
-        weighted_loss = jnp.mean(batch_losses * weights)
+        if use_weights:
+            weighted_loss = jnp.mean(batch_losses * weights)
+        else:
+            weighted_loss = jnp.mean(batch_losses)
         return weighted_loss, preds
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, _), grads = grad_fn(state.params)
+    
+    grad_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
+    (loss, _), grads = grad_fn(state.params, weights)
     grads = jax.lax.pmean(grads, axis_name="device")
     loss = jax.lax.pmean(loss, axis_name="device")
     state = state.apply_gradients(grads=grads)
-    return loss, state
+    global_norm = optax.global_norm(grads)
+    diagnostics['grad_norm'] = global_norm 
+    diagnostics['is_grad_clipped'] = global_norm > clip_max_norm 
+    return loss, state, diagnostics
 
 
 def eval_step(state: TrainState, data: Array, targets: Array, attention_mask: Array) -> Array:
@@ -106,6 +135,20 @@ def _init_log(bsln_preds: Preds, n_dims: int) -> dict:
                 log[f"eval/{_task_name}"][f"{_bsln_name} | True (RelErr)"] = _rel_errs_per_sample.tolist()
     return log
 
+def update_log_with_diagnostics(log: dict, diagnostics: dict) -> None:
+    main_key = "train"
+    for subkey, value in diagnostics.items():
+        if isinstance(value, dict):
+            for subsubkey, subvalue in value.items():
+                try:
+                    log[f"{main_key}/{subkey}/{subsubkey}"].append(u.to_float(subvalue))
+                except KeyError:
+                    log[f"{main_key}/{subkey}/{subsubkey}"] = [u.to_float(subvalue)]
+        else:
+            try:
+                log[f"{main_key}/{subkey}"].append(u.to_float(value))
+            except KeyError:
+                log[f"{main_key}/{subkey}"] = [u.to_float(value)]
 
 def train(config: ConfigDict) -> None:
     # Setup train experiment with Hydra output directory
@@ -114,13 +157,14 @@ def train(config: ConfigDict) -> None:
     exp_name = f"train_{u.get_hash(config)}"
     
     logging.info(f"Train Experiment\nNAME: {exp_name}\nOUTPUT_DIR: {exp_dir}\n")
-
+    
+    add_seed = config.get("add_seed", 0)
     for key, value in config.items():
         if isinstance(value, ConfigDict):
             for sub_key, sub_value in value.items():
                 if "seed" in sub_key:
-                    logging.info(f"Updated {key}.{sub_key} to {sub_value + config.add_seed}")
-                    config[key][sub_key] += config.add_seed
+                    logging.info(f"Updated {key}.{sub_key} to {sub_value + add_seed}")
+                    config[key][sub_key] += add_seed
     
     # Validate config 
     assert config.model.n_points == config.task.n_max_points, "Model n_points must match Task n_max_points"
@@ -158,9 +202,20 @@ def train(config: ConfigDict) -> None:
     logging.info("Initialized Data Samplers")
 
     # Steps
-    p_train_step = jax.pmap(train_step, axis_name="device", donate_argnums=0)
+    p_train_step = jax.pmap(
+            train_step,
+            axis_name="device",
+            donate_argnums=0,
+            # Static args: T, alpha0, T_ramp_ratio, use_weights, clip_max_norm
+            static_broadcasted_argnums=(7, 8, 9, 10, 11)
+            )
     p_eval_step = jax.pmap(eval_step, axis_name="device")
     logging.info("Pmap'd Steps")
+
+    use_weights = config.task.use_weights
+    clip_max_norm = config.training.get("clip_max_norm", 1.0)
+    alpha0 = config.training.get("alpha0", 0.5)
+    T_ramp_ratio = config.training.get("T_ramp_ratio", 0.4)
 
     # Evaluate baselines
     logging.info("Evaluate Baselines...")
@@ -186,11 +241,27 @@ def train(config: ConfigDict) -> None:
         # Train step
         data, _, weights, targets, attention_mask = j_sample_train_batch(i)
         
-        loss, state = p_train_step(state, data, weights, targets, attention_mask, dropout_rngs)
+        loss, state, diagnostics = (
+                p_train_step(
+                    state,
+                    data,
+                    weights,
+                    targets,
+                    attention_mask,
+                    dropout_rngs,
+                    jnp.full(jax.local_device_count(), i, dtype=jnp.int32),
+                    config.training.total_steps,
+                    alpha0,
+                    T_ramp_ratio,
+                    use_weights,
+                    clip_max_norm
+                    )
+                )
         train_losses.append(loss.item())
         log["train/step"].append(i)
         log["train/lr"].append(float(lr(i)))
         log["train/loss"].append(loss.item())
+        update_log_with_diagnostics(log, diagnostics)
 
         # Evaluate
         if i % config.eval.every == 0 or i == config.training.total_steps:
@@ -200,9 +271,21 @@ def train(config: ConfigDict) -> None:
             # Calculate and print average training loss over last epoch
             recent_losses = train_losses[-epoch_size:]
             avg_train_loss = sum(recent_losses) / len(recent_losses)
+
+            recent_clips = log["train/is_grad_clipped"][-epoch_size:]
+            avg_clips = sum(recent_clips) / len(recent_clips)
+
+            recent_ess = log["train/final/ess"][-epoch_size:]
+            avg_ess = sum(recent_ess) / len(recent_ess)
+
+            recent_p995 = log["train/soft_clipped/P99.5"][-epoch_size:]
+            avg_p995 = sum(recent_p995) / len(recent_p995)
+
+            recent_median = log["train/soft_clipped/median"][-epoch_size:]
+            avg_median = sum(recent_median) / len(recent_median)
             
             # Log step and lr
-            logging.info(f"Step: {i} [{t:.2f}s] | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.6f} | LR: {float(lr(i)):.6f}")
+            logging.info(f"Step: {i} [{t:.2f}s] | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.3f} | Clips: {avg_clips * 100:.2f}% | ESS: {avg_ess:.2f} | P99.5/Med.: {avg_p995 /  avg_median:.2f} | LR: {float(lr(i)):.6f}")
             
             # Evaluate model
             eval_preds = get_model_preds(

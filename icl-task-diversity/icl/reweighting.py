@@ -167,7 +167,6 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     hard_clipped_weights = jnp.exp(weights_hard)
     
     diagnostics = {
-        "step": t,
         "alpha": alpha,
         "original": compute_diagnostics(original_weights),
         "soft_clipped": compute_diagnostics(soft_clipped_weights),

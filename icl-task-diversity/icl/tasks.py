@@ -595,19 +595,21 @@ class OrnsteinUhlenbeckTask:
             # log_weights = self.weights[idxs] 
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                          self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
-            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+            # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.task_n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                                  self.distrib_name, self.distrib_param, shape, self.dtype)
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                          self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
-            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+            # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+        weights = log_weights
         chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
         chex.assert_shape(weights, (self.batch_size, 1))
         # jax.debug.print("Weights sum: {}", jnp.sum(weights))
         # jax.debug.print("Batch statistics: tasks min {}, max {}, mean {}",
         #                jnp.min(tasks), jnp.max(tasks), jnp.mean(tasks))
+        # Now: returns unnormalized log weights
         return tasks, weights
 
     @jax.jit

@@ -3,7 +3,7 @@ import optax
 
 
 def get_optimizer_and_lr_schedule(
-    optimizer: str, schedule: str, **kwargs
+        optimizer: str, schedule: str, clip_max_norm: float = 1.0, **kwargs
 ) -> tuple[optax.GradientTransformation, optax.Schedule]:
     # Lr Schedule
     match schedule:
@@ -43,4 +43,11 @@ def get_optimizer_and_lr_schedule(
         tx = optax.adamw(lr, weight_decay=kwargs["weight_decay"], mask=mask)
     else:
         raise NotImplementedError
+    
+    # Add gradient clipping
+    tx = optax.chain(
+        optax.clip_by_global_norm(clip_max_norm),
+        tx
+    )
+    
     return tx, lr

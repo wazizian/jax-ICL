@@ -98,3 +98,8 @@ def tabulate_model(model: Transformer | SingleSeqTransformer, n_dims: int, n_poi
         dummy_mask = jnp.ones((batch_size, 2 * model.n_points, 2 * model.n_points)).astype(bool)
     
     return model.tabulate(jr.PRNGKey(0), dummy_data, dummy_targets, dummy_mask, training=False, depth=0)
+
+def to_float(x):
+    if isinstance(x, jnp.ndarray):
+        return float(x.item())
+    return float(x)

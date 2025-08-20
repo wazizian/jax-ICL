@@ -20,6 +20,7 @@ task:
   distrib_name: normal
   distrib_param: null
   n_max_points: 4
+  use_weights: true
 
 model:
   name: single_seq_transformer
@@ -39,6 +40,7 @@ training:
   warmup_steps: 50
   total_steps: 5000
   weight_decay: 0.01
+  clip_max_norm: 1.0
 
 eval:
   n_samples: 16
