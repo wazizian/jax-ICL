@@ -11,7 +11,7 @@ task:
   n_points: 32
   n_max_points: 32
   use_curriculum: false
-  batch_size: 256
+  batch_size: 512
   data_seed: 101
   task_seed: 102
   noise_seed: 103
@@ -41,13 +41,13 @@ training:
   lr: 2.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 50_000
-  total_steps: 400_000
+  total_steps: 500_000
   weight_decay: 0.1
   clip_max_norm: 1.0
 
 eval:
   n_samples: 2048
-  batch_size: 256
+  batch_size: 512
   data_seed: 104
   task_seed: 105
   noise_seed: 106

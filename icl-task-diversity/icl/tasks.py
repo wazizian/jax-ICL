@@ -108,7 +108,7 @@ def sample_distrib(
         raise ValueError(f"Unknown distribution name: {distrib_name}")
 
 #@partial(jax.jit, static_argnames=("clip",))
-def task_log_weights(
+def aux_task_log_weights(
         tasks: Array,
         loc: float,
         scale: float,
@@ -160,6 +160,26 @@ def task_weights_trunc_norm_factor(
             )
     jax.debug.print("Trunc norm factor 1d: {}", Z_1d)
     return Z_1d ** n_dims
+
+def task_log_weights(
+        tasks: Array,
+        loc: float,
+        scale: float,
+        clip: float | None,
+        distrib_name: str,
+        distrib_param: float | None,
+        ref_distrib_name: str = "student",
+        ref_distrib_param: float = 3.0,
+        use_weights: bool = False,
+        reduce_axis: int = -1
+        ) -> Array:
+    return \
+        aux_task_log_weights(
+            tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
+            ) \
+        - aux_task_log_weights(
+            tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
+            )
 
 
 ########################################################################################################################
@@ -295,14 +315,15 @@ class NoisyLinearRegression:
             # log_weights = self.weights[idxs] 
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                          self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
-            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+            #weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                                  self.distrib_name, self.distrib_param, shape, self.dtype)
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                          self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
-            weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+            #weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
+        weights = log_weights
         chex.assert_shape(tasks, (self.batch_size, self.n_dims, 1))
         chex.assert_shape(weights, (self.batch_size, 1))
         # jax.debug.print("Weights sum: {}", jnp.sum(weights))

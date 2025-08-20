@@ -17,7 +17,7 @@ task:
   task_scale: 1.0
   noise_scale: 0.5
   clip: null
-  use_weights: false
+  use_weights: true
   distrib_name: student
   distrib_param: 3.0
   ou_step: 0.2

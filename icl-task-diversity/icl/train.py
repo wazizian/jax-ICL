@@ -98,7 +98,7 @@ def train_step(state: TrainState,
         # jax.debug.print("Weights: mean={}, median={}, min={}, max={}",
         #                jnp.mean(weights), jnp.median(weights), jnp.min(weights), jnp.max(weights))
         if use_weights:
-            weighted_loss = jnp.mean(batch_losses * weights)
+            weighted_loss = jnp.sum(batch_losses * weights)
         else:
             weighted_loss = jnp.mean(batch_losses)
         return weighted_loss, preds

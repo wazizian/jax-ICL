@@ -71,7 +71,7 @@ def renormalize_weights(log_weights: Array) -> Array:
     Returns:
         Renormalized weights
     """
-    return jax.nn.softmax(log_weights)
+    return jax.nn.softmax(log_weights, axis=0)
 
 def compute_gini_coefficient(weights: Array) -> float:
     """
@@ -124,7 +124,9 @@ def compute_diagnostics(weights: Array) -> Dict[str, Any]:
         "gini": compute_gini_coefficient(weights),
         
         # Effective Sample Size (ESS) per batch
-        "ess": 1.0 / jnp.sum(weights ** 2) / weights.shape[0],
+        "ess": (
+            jnp.sum(weights) ** 2 / jnp.sum(weights ** 2) / weights.shape[0]
+            ),
         
         # Additional useful metrics
         "sum": jnp.sum(weights)
@@ -148,6 +150,10 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     Returns:
         Tuple of (processed_weights, diagnostics)
     """
+    # Validate inputs
+    chex.assert_rank(log_weights, 2)
+    chex.assert_axis_dimension(log_weights, 1, 1)
+
     # 1. Compute alpha according to schedule
     T_ramp = int(T_ramp_ratio * T)
     alpha = compute_alpha_schedule(t, T, alpha0, T_ramp)
@@ -165,7 +171,7 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     original_weights = jnp.exp(log_weights)
     soft_clipped_weights = jnp.exp(weights_soft)
     hard_clipped_weights = jnp.exp(weights_hard)
-    
+
     diagnostics = {
         "alpha": alpha,
         "original": compute_diagnostics(original_weights),
