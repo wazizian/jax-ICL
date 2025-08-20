@@ -94,6 +94,21 @@ def compute_gini_coefficient(weights: Array) -> float:
     
     return gini
 
+
+def kl_divergence_from_uniform(weights: Array) -> float:
+    """
+    Compute KL divergence from uniform distribution: D(weights || uniform)
+    
+    Args:
+        weights: Array of weights (should sum to 1)
+    
+    Returns:
+        KL divergence (0 = perfectly uniform, higher = more non-uniform)
+    """
+    n = weights.shape[0]
+    uniform = jnp.ones(n) / n
+    return jnp.sum(jax.scipy.special.kl_div(weights, uniform))
+
 def compute_diagnostics(weights: Array) -> Dict[str, Any]:
     """
     Compute comprehensive diagnostics for weights.
@@ -122,6 +137,9 @@ def compute_diagnostics(weights: Array) -> Dict[str, Any]:
         
         # Gini coefficient for inequality
         "gini": compute_gini_coefficient(weights),
+        
+        # KL divergence from uniform distribution
+        "kl_from_uniform": kl_divergence_from_uniform(weights),
         
         # Effective Sample Size (ESS) per batch
         "ess": (
@@ -168,9 +186,9 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     weights_final = renormalize_weights(weights_hard)
     
     # 5. Compute diagnostics
-    original_weights = jnp.exp(log_weights)
-    soft_clipped_weights = jnp.exp(weights_soft)
-    hard_clipped_weights = jnp.exp(weights_hard)
+    original_weights = renormalize_weights(log_weights) 
+    soft_clipped_weights = renormalize_weights(weights_soft)
+    hard_clipped_weights = renormalize_weights(weights_hard)
 
     diagnostics = {
         "alpha": alpha,

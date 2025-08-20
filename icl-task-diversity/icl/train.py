@@ -283,9 +283,16 @@ def train(config: ConfigDict) -> None:
 
             recent_median = log["train/soft_clipped/median"][-epoch_size:]
             avg_median = sum(recent_median) / len(recent_median)
+
+            recent_kl_original = log["train/original/kl_from_uniform"][-epoch_size:]
+            avg_kl_original = sum(recent_kl_original) / len(recent_kl_original)
+
+            recent_kl_final = log["train/final/kl_from_uniform"][-epoch_size:]
+            avg_kl_final = sum(recent_kl_final) / len(recent_kl_final)
             
             # Log step and lr
-            logging.info(f"Step: {i} [{t:.2f}s] | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.3f} | Clips: {avg_clips * 100:.2f}% | ESS: {avg_ess:.2f} | P99.5/Med.: {avg_p995 /  avg_median:.2f} | LR: {float(lr(i)):.6f}")
+            logging.info(f"Step: {i} [{t:.2f}s] | Train Loss (last {len(recent_losses)} steps): {avg_train_loss:.3f} | Clips: {avg_clips * 100:.2f}% | LR: {float(lr(i)):.6f}")
+            logging.info(f"ESS: {avg_ess:.6f} | P99.5/Med.: {avg_p995 /  avg_median:.2f} | KL Orig.: {avg_kl_original:.6f} | KL Final: {avg_kl_final:.6f}")
             
             # Evaluate model
             eval_preds = get_model_preds(
