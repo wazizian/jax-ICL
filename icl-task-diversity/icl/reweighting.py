@@ -169,8 +169,9 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
         Tuple of (processed_weights, diagnostics)
     """
     # Validate inputs
-    chex.assert_rank(log_weights, 2)
-    chex.assert_axis_dimension(log_weights, 1, 1)
+    chex.assert_rank(log_weights, {1, 2})
+    if log_weights.ndim == 2:
+        chex.assert_axis_dimension(log_weights, 1, 1)
 
     # 1. Compute alpha according to schedule
     T_ramp = int(T_ramp_ratio * T)
