@@ -18,6 +18,7 @@ task:
   noise_scale: 0.5
   clip: null
   use_weights: true
+  use_weight_sampling: true
   distrib_name: student
   distrib_param: .inf
   ou_step: 0.2

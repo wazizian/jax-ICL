@@ -548,6 +548,7 @@ class OrnsteinUhlenbeckTask:
     name: str | None = None  # Optional, can be set to override default name
     eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
     use_weights: bool = False  # Optional, whether to use task importance weights
+    use_weight_sampling: bool = False  # Whether to use weighted sampling for tasks
     distrib_name: str = "normal"  # Distribution name: "normal" or "student"
     distrib_param: float | None = None  # Distribution parameter (degrees of freedom for student-t)
     use_curriculum: bool = False  # Whether to use curriculum learning
@@ -627,13 +628,18 @@ class OrnsteinUhlenbeckTask:
     def sample_tasks(self, step: int) -> Array:
         key = jax.random.fold_in(self.task_key, step)
         if self.n_tasks > 0:
-            idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
+            if self.use_weight_sampling:
+                # Sample tasks with replacement based on weights
+                idxs = jax.random.categorical(key, self.weights, axis=0, shape=(self.batch_size,))
+                log_weights = jnp.zeros((self.batch_size, 1), self.dtype)  # No need to sample weights here
+            else:
+                idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
+                # log_weights = self.weights[idxs] 
+                log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                             self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+                # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
             # jax.debug.print("Sampled indices for tasks: {}", idxs)
             tasks = self.task_pool[idxs]
-            # log_weights = self.weights[idxs] 
-            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
-            # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.task_n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
