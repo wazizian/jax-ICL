@@ -84,13 +84,19 @@ def train_step(state: TrainState,
                ) -> tuple[Array, TrainState]:
 
     dropout_rng = jr.fold_in(dropout_rng, state.step + 1)
+    dropout_rng, resample_rng = jr.split(dropout_rng)
 
     if not use_weights:
         log_weights = jnp.zeros(data.shape[0], dtype=jnp.float32)
 
-    weights, diagnostics = process_log_weights(
-        log_weights, t, T, alpha0=alpha0, T_ramp_ratio=T_ramp_ratio
+    weights, new_indices, diagnostics = process_log_weights(
+        dropout_rng, log_weights, t, T, alpha0=alpha0, T_ramp_ratio=T_ramp_ratio
         )
+    
+    if use_weights:
+        data = jnp.take(data, new_indices, axis=0)
+        targets = jnp.take(targets, new_indices, axis=0)
+        attention_mask = jnp.take(attention_mask, new_indices, axis=0)
 
     def loss_fn(params, weights):
         preds = state.apply_fn({"params": params}, data, targets, attention_mask, training=True, rngs={"dropout": dropout_rng})

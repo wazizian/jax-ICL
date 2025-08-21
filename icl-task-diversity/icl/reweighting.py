@@ -153,7 +153,7 @@ def compute_diagnostics(weights: Array) -> Dict[str, Any]:
     return diagnostics
 
 @partial(jax.jit, static_argnames=["T","T_ramp_ratio"])
-def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5, 
+def process_log_weights(key: jax.random.key, log_weights: Array, t: int, T: int, alpha0: float = 0.5, 
                        T_ramp_ratio: float = 0.4) -> tuple[Array, Dict[str, Any]]:
     """
     Main function to process log weights with soft clipping, hard clipping, and renormalization.
@@ -172,6 +172,7 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     chex.assert_rank(log_weights, {1, 2})
     if log_weights.ndim == 2:
         chex.assert_axis_dimension(log_weights, 1, 1)
+    batch_size = log_weights.shape[0]
 
     # 1. Compute alpha according to schedule
     T_ramp = int(T_ramp_ratio * T)
@@ -182,20 +183,29 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     
     # 3. Apply hard clipping
     weights_hard = soft_hard_clip(weights_soft)
+
+    # 4. Resample to increase Effective Sample Size (ESS)
+    temp = 2
+    logits = weights_hard / temp
+    new_indices = jax.random.categorical(key, logits, axis=0, shape=(batch_size,), replace=True)
+    weights_resampled = jnp.take(weights_hard * (1 - 1/temp), new_indices, axis=0)
+    chex.assert_shape(weights_resampled, log_weights.shape)
     
-    # 4. Renormalize to sum to 1
-    weights_final = renormalize_weights(weights_hard)
-    
-    # 5. Compute diagnostics
+    # 5. Renormalize to sum to 1
+    weights_final = renormalize_weights(weights_resampled)
+
+    # 6. Compute diagnostics
     original_weights = renormalize_weights(log_weights) 
     soft_clipped_weights = renormalize_weights(weights_soft)
     hard_clipped_weights = renormalize_weights(weights_hard)
+    resampled_weights = renormalize_weights(weights_resampled)
 
     diagnostics = {
         "alpha": alpha,
         "original": compute_diagnostics(original_weights),
         "soft_clipped": compute_diagnostics(soft_clipped_weights),
         "hard_clipped": compute_diagnostics(hard_clipped_weights),
+        "resampled": compute_diagnostics(resampled_weights),
         "final": compute_diagnostics(weights_final),
         "clipping_bounds": {
             "hard_clip_lower": 1e-6 * jnp.median(soft_clipped_weights),
@@ -205,4 +215,5 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
         }
     }
     
-    return weights_final, diagnostics
+    return weights_final, new_indices, diagnostics
+
