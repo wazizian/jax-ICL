@@ -632,14 +632,16 @@ class OrnsteinUhlenbeckTask:
                 # Sample tasks with replacement based on weights
                 idxs = jax.random.categorical(key, self.weights, axis=0, shape=(self.batch_size,))
                 log_weights = jnp.zeros((self.batch_size, 1), self.dtype)  # No need to sample weights here
+                # jax.debug.print("Using weighted sampling for tasks")
+                tasks = self.task_pool[idxs]
             else:
                 idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
                 # log_weights = self.weights[idxs] 
+                tasks = self.task_pool[idxs]
                 log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
                                              self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
                 # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
             # jax.debug.print("Sampled indices for tasks: {}", idxs)
-            tasks = self.task_pool[idxs]
         else:
             shape = self.batch_size, self.task_n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
@@ -854,6 +856,7 @@ class OrnsteinUhlenbeckTask:
             'name': self.name,
             'eval_ridge': self.eval_ridge,
             'use_weights': self.use_weights,
+            'use_weight_sampling': self.use_weight_sampling,
             'distrib_name': self.distrib_name,
             'distrib_param': self.distrib_param,
             'use_curriculum': self.use_curriculum,

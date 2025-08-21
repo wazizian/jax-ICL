@@ -4,7 +4,7 @@ log_level: INFO
 
 task:
   name: ornstein_uhlenbeck
-  n_tasks: 0
+  n_tasks: 4
   n_data: 0
   n_dims: 2
   n_points: 64

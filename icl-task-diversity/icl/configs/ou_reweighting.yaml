@@ -20,7 +20,7 @@ task:
   noise_scale: 0.5
   clip: null
   use_weights: true
-  use_weight_sampling: false
+  use_weight_sampling: true
   eval_ridge: false
   distrib_name: student
   distrib_param: .inf
