@@ -5,7 +5,7 @@ add_seed: 0
 
 task:
   name: ornstein_uhlenbeck
-  n_tasks: 100_000
+  n_tasks: 500_000
   n_data: 0
   n_dims: 8 
   n_points: 32
