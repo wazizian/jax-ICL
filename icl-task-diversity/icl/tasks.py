@@ -140,7 +140,7 @@ def aux_task_log_weights(
     else:
         raise ValueError(f"Unknown distribution name: {distrib_name}")
     
-    return - jnp.sum(log_weights, axis=reduce_axis)  # IMPORTANT: minus
+    return jnp.sum(log_weights, axis=reduce_axis)  # IMPORTANT: no minus
 
 def task_weights_trunc_norm_factor(
         loc: float,
@@ -175,10 +175,10 @@ def task_log_weights(
         ) -> Array:
     return \
         aux_task_log_weights(
-            tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
+            tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
             ) \
         - aux_task_log_weights(
-            tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
+            tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
             )
 
 
@@ -282,8 +282,17 @@ class NoisyLinearRegression:
         shape = self.n_tasks, self.n_dims, 1
         tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                               self.distrib_name, self.distrib_param, shape, self.dtype)
-        log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                     self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+
+        log_weights = task_log_weights(
+                tasks,
+                self.task_center,
+                self.task_scale,
+                self.clip, 
+                self.distrib_name,
+                self.distrib_param,
+                use_weights=self.use_weights,
+                reduce_axis=1
+                )
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
         return tasks, weights
@@ -320,8 +329,16 @@ class NoisyLinearRegression:
             shape = self.batch_size, self.n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                                  self.distrib_name, self.distrib_param, shape, self.dtype)
-            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+            log_weights = task_log_weights(
+                    tasks,
+                    self.task_center,
+                    self.task_scale,
+                    self.clip, 
+                    self.distrib_name,
+                    self.distrib_param,
+                    use_weights=self.use_weights,
+                    reduce_axis=1
+                    )
             #weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         weights = log_weights
         chex.assert_shape(tasks, (self.batch_size, self.n_dims, 1))
@@ -584,7 +601,7 @@ class OrnsteinUhlenbeckTask:
                               self.distrib_name, self.distrib_param, shape, self.dtype)
 
         log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                     self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+                                     self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
         return tasks, weights
@@ -615,14 +632,14 @@ class OrnsteinUhlenbeckTask:
             tasks = self.task_pool[idxs]
             # log_weights = self.weights[idxs] 
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
             # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.task_n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
                                  self.distrib_name, self.distrib_param, shape, self.dtype)
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
             # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         weights = log_weights
         chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))

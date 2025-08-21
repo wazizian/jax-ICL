@@ -1,4 +1,5 @@
 import json
+import yaml
 import os
 from pathlib import Path
 import time
@@ -240,7 +241,7 @@ def train(config: ConfigDict) -> None:
     for i in range(1, config.training.total_steps + 1):
         # Train step
         data, _, weights, targets, attention_mask = j_sample_train_batch(i)
-        
+
         loss, state, diagnostics = (
                 p_train_step(
                     state,
@@ -262,6 +263,10 @@ def train(config: ConfigDict) -> None:
         log["train/lr"].append(float(lr(i)))
         log["train/loss"].append(loss.item())
         update_log_with_diagnostics(log, diagnostics)
+
+        # diagnostics = jax.tree.map(u.to_float, diagnostics)
+        # yaml_diagnostics = yaml.dump(diagnostics)
+        # print(f"Step {i} Diagnostics:\n{yaml_diagnostics}")
 
         # Evaluate
         if i % config.eval.every == 0 or i == config.training.total_steps:

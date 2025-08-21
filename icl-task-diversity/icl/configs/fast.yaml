@@ -19,7 +19,7 @@ task:
   clip: null
   use_weights: true
   distrib_name: student
-  distrib_param: 3.0
+  distrib_param: .inf
   ou_step: 0.2
 
 model:
