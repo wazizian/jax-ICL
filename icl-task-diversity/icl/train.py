@@ -348,7 +348,7 @@ def train(config: ConfigDict) -> None:
             logging.info("Saved logs to Hydra output directory")
 
             # Checkpoint - save to Hydra output directory
-            ckpt_mngr.save(i, args=ocp.args.StandardSave(jax_utils.unreplicate(state)))
+            # ckpt_mngr.save(i, args=ocp.args.StandardSave(jax_utils.unreplicate(state)))
             logging.info("=========================")
 
             # Reset last epoch time

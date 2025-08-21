@@ -6,7 +6,7 @@ task:
   name: ornstein_uhlenbeck
   n_tasks: 4
   n_data: 0
-  n_dims: 2
+  n_dims: 1
   n_points: 64
   n_max_points: 64
   batch_size: 8
@@ -32,7 +32,7 @@ model:
   seed: 100
   use_ln: true
   use_linear_attention: false
-  n_out: 2
+  n_out: 1
 
 training:
   optimizer: adam

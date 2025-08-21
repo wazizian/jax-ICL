@@ -140,7 +140,7 @@ def aux_task_log_weights(
     else:
         raise ValueError(f"Unknown distribution name: {distrib_name}")
     
-    return jnp.sum(log_weights, axis=reduce_axis)  # IMPORTANT: no minus
+    return jnp.sum(log_weights, axis=reduce_axis)
 
 def task_weights_trunc_norm_factor(
         loc: float,
@@ -173,11 +173,11 @@ def task_log_weights(
         use_weights: bool = False,
         reduce_axis: int = -1
         ) -> Array:
-    return \
-        aux_task_log_weights(
-            tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
-            ) \
-        - aux_task_log_weights(
+    #return \
+        #aux_task_log_weights(
+        #   tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
+        #    ) \
+    return    - aux_task_log_weights(
             tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
             )
 
@@ -254,9 +254,12 @@ class NoisyLinearRegression:
     use_curriculum: bool = False  # Whether to use curriculum learning
     curriculum_n_points_increment: int = 2  # Increment for curriculum learning
     curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
+    _skip_init: bool = False  # Private parameter to skip __post_init__ logic
 
 
     def __post_init__(self):
+        if self._skip_init:
+            return
         # Validation
         self.data_key = jax.random.PRNGKey(self.data_seed)
         self.task_key = jax.random.PRNGKey(self.task_seed)
@@ -499,7 +502,7 @@ class NoisyLinearRegression:
         
         # Create object with aux_data parameters and placeholder scale values
         obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
-                 task_center=0.0, clip=None, **aux_data)
+                 task_center=0.0, clip=None, _skip_init=True, **aux_data)
         
         # Set the dynamic values
         obj.data_key = data_key
@@ -556,9 +559,12 @@ class OrnsteinUhlenbeckTask:
     curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
     ou_step: float = 1e-2
     task_n_dims: int | None = None  # Automatically set to 2*n_dims in __post_init__
+    _skip_init: bool = False  # Private parameter to skip __post_init__ logic
 
 
     def __post_init__(self):
+        if self._skip_init:
+            return
         # Validation
         self.data_key = jax.random.PRNGKey(self.data_seed)
         self.task_key = jax.random.PRNGKey(self.task_seed)
@@ -605,6 +611,8 @@ class OrnsteinUhlenbeckTask:
                                      self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
+        jax.debug.print("Tasks: {tasks}", tasks=tasks)
+        jax.debug.print("Log weights: {log_weights}", log_weights=log_weights)
         return tasks, weights
 
     def generate_data_pool(self) -> Array:
@@ -875,7 +883,7 @@ class OrnsteinUhlenbeckTask:
         
         # Create object with aux_data parameters and placeholder scale values
         obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
-                 task_center=0.0, clip=None, **aux_data)
+                 task_center=0.0, clip=None, _skip_init=True, **aux_data)
         
         # Set the dynamic values
         obj.data_key = data_key
