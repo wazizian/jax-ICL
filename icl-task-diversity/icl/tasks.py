@@ -611,8 +611,8 @@ class OrnsteinUhlenbeckTask:
                                      self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
-        jax.debug.print("Tasks: {tasks}", tasks=tasks)
-        jax.debug.print("Log weights: {log_weights}", log_weights=log_weights)
+        # jax.debug.print("Tasks: {tasks}", tasks=tasks)
+        # jax.debug.print("Log weights: {log_weights}", log_weights=log_weights)
         return tasks, weights
 
     def generate_data_pool(self) -> Array:
