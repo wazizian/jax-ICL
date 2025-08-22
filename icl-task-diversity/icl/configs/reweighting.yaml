@@ -7,7 +7,7 @@ task:
   name: noisy_linear_regression
   n_tasks: 0
   n_data: 0
-  n_dims: 8
+  n_dims: 4
   n_points: 128
   n_max_points: 128
   batch_size: 256
@@ -27,7 +27,7 @@ task:
 model:
   name: transformer
   n_points: 128
-  n_layer: 8
+  n_layer: 6
   n_embd: 32
   n_head: 8
   seed: 100
