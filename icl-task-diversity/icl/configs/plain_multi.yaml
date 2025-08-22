@@ -8,7 +8,7 @@ task:
   n_data: 0
   n_dims: 4
   n_points: 128
-  batch_size: 64
+  batch_size: 256
   data_seed: 101
   task_seed: 102
   noise_seed: 103
@@ -75,4 +75,5 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      task.distrib_param: inf, 3.0, 5.0, 10.0
+      # task.distrib_param: inf, 3.0, 5.0, 10.0
+      use_weights: true,false

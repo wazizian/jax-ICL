@@ -85,7 +85,7 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      use_weights: true, false
+      task.use_weights: true, false
       # task.distrib_param: inf, 3.0, 5.0, 10.0
       # training.weight_decay: 0.01, 0.1, 0.5
       # training.lr: 1e-3

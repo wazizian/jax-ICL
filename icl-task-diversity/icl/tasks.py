@@ -249,6 +249,7 @@ class NoisyLinearRegression:
     name: str | None = None  # Optional, can be set to override default name
     eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
     use_weights: bool = False  # Optional, whether to use task importance weights
+    use_weight_sampling: bool = False  # Whether to use weighted sampling for tasks
     distrib_name: str = "normal"  # Distribution name: "normal" or "student"
     distrib_param: float | None = None  # Distribution parameter (degrees of freedom for student-t)
     use_curriculum: bool = False  # Whether to use curriculum learning
