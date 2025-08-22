@@ -41,6 +41,7 @@ training:
   warmup_steps: 10
   total_steps: 20
   clip_max_norm: null
+  T_ramp_ratio: 0.2
 
 eval:
   n_samples: 16
