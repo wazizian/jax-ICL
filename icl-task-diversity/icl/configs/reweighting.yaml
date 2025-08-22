@@ -86,7 +86,7 @@ hydra:
   sweeper:
     params:
       task.use_weights: true, false
-      # task.distrib_param: inf, 3.0, 5.0, 10.0
+      task.distrib_param: 5.0, 10.0
       # training.weight_decay: 0.01, 0.1, 0.5
       # training.lr: 1e-3
       # add_seed: 1
