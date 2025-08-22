@@ -1047,6 +1047,176 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
             print(f"  {task_name} (center={task_center}): alpha={alpha:.4f}, C={C:.6f}, R²={r_squared:.4f}")
 
 
+def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
+    """Load all log files and metadata upfront to avoid duplicate I/O.
+    
+    Args:
+        run_paths: List of Path objects pointing to runs or multirun subdirs
+        run_labels: Custom labels for runs (optional)
+    
+    Returns:
+        dict: {
+            'logs': {run_label: log_data},
+            'metadata': {run_label: (config, task_centers)},
+            'run_labels': [ordered_list_of_run_labels]
+        }
+    """
+    loaded_data = {
+        'logs': {},
+        'metadata': {},
+        'run_labels': []
+    }
+    
+    if not run_paths:
+        return loaded_data
+    
+    actual_run_labels = []
+    
+    for i, run_path in enumerate(run_paths):
+        run_path = Path(run_path)
+        
+        # Determine run label
+        if run_labels and i < len(run_labels):
+            run_label = run_labels[i]
+        else:
+            run_label = run_path.name
+        
+        # Check if this is a multirun directory or single run
+        if (run_path / "multirun.yaml").exists():
+            # This is a multirun directory - we want to analyze each subrun separately
+            subdirs = find_valid_multirun_subdirs(run_path, return_paths=True)
+            
+            # Extract parameter names from multirun.yaml if no custom labels provided
+            if run_labels is None:
+                param_names = create_run_display_names(run_path, [subdir.name for subdir in subdirs])
+                if param_names:
+                    subrun_labels = [param_names.get(int(subdir.name), subdir.name) for subdir in subdirs]
+                else:
+                    subrun_labels = [f"{run_label}-{subdir.name}" for subdir in subdirs]
+            else:
+                subrun_labels = [f"{run_label}-{subdir.name}" for subdir in subdirs]
+            
+            # Process each subrun as a separate run
+            for subdir_idx, subdir in enumerate(subdirs):
+                # Load config and log for this subrun
+                config_path = subdir / "config.json"
+                
+                if not config_path.exists():
+                    continue
+                
+                try:
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    log = load_log_with_safetensors(subdir)
+                    
+                    # Extract task centers from config
+                    task_centers = config.get('eval', {}).get('task_centers', [])
+                    
+                    # Create run data for this subrun
+                    if subdir_idx < len(subrun_labels):
+                        subrun_label = subrun_labels[subdir_idx].strip()
+                    else:
+                        subrun_label = f"{run_label}-{subdir.name}"
+                    
+                    # Store loaded data
+                    loaded_data['logs'][subrun_label] = log
+                    loaded_data['metadata'][subrun_label] = (config, task_centers)
+                    actual_run_labels.append(subrun_label)
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to load data for {subdir}: {e}")
+                    continue
+        
+        elif (run_path / "log.json").exists():
+            # This is a single run
+            config_path = run_path / "config.json"
+            
+            if not config_path.exists():
+                continue
+            
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                log = load_log_with_safetensors(run_path)
+                
+                # Extract task centers from config
+                task_centers = config.get('eval', {}).get('task_centers', [])
+                
+                # Store loaded data
+                loaded_data['logs'][run_label] = log
+                loaded_data['metadata'][run_label] = (config, task_centers)
+                actual_run_labels.append(run_label)
+                
+            except Exception as e:
+                print(f"Warning: Failed to load data for {run_path}: {e}")
+                continue
+        
+        else:
+            print(f"Warning: {run_path} is neither a valid run nor multirun directory")
+            continue
+    
+    loaded_data['run_labels'] = actual_run_labels
+    return loaded_data
+
+
+def process_loaded_data_for_baseline(loaded_data: dict, baseline_type: str) -> tuple[dict, dict, dict]:
+    """Process pre-loaded data for a specific baseline without any I/O.
+    
+    Args:
+        loaded_data: Dictionary returned by load_all_logs()
+        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
+    
+    Returns:
+        tuple: (min_mse_dict, mean_mse_dict, selected_steps_dict) where:
+            min_mse_dict: {run_label: [(task_center, min_mse, task_name), ...]}
+            mean_mse_dict: {run_label: [(task_center, mean_mse, task_name), ...]}
+            selected_steps_dict: {run_label: {task_name: (min_step, mean_step)}}
+    """
+    min_mse_data = {}
+    mean_mse_data = {}
+    selected_steps_data = {}
+    
+    for run_label in loaded_data['run_labels']:
+        log = loaded_data['logs'][run_label]
+        config, task_centers = loaded_data['metadata'][run_label]
+        
+        # Extract minimum MSE and mean MSE over context length for all tasks
+        try:
+            min_mse_params, mean_mse_params, selected_steps = extract_min_mse_params_for_baseline(
+                log, baseline_type, return_selected_steps=True
+            )
+            
+            min_mse_run_data = []
+            mean_mse_run_data = []
+            
+            # Add Test tasks (task center = 0)
+            if "Test tasks" in min_mse_params:
+                min_mse = min_mse_params["Test tasks"]
+                mean_mse = mean_mse_params.get("Test tasks", 0)
+                min_mse_run_data.append((0.0, min_mse, "Test tasks"))
+                mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
+            
+            # Add Fixed tasks
+            for task_center in task_centers:
+                task_name = f"Fixed task {task_center}"
+                if task_name in min_mse_params:
+                    min_mse = min_mse_params[task_name]
+                    mean_mse = mean_mse_params.get(task_name, 0)
+                    min_mse_run_data.append((task_center, min_mse, task_name))
+                    mean_mse_run_data.append((task_center, mean_mse, task_name))
+            
+            if min_mse_run_data:
+                min_mse_data[run_label] = min_mse_run_data
+                mean_mse_data[run_label] = mean_mse_run_data
+                selected_steps_data[run_label] = selected_steps
+                
+        except Exception as e:
+            print(f"Warning: Failed to process {baseline_type} baseline for {run_label}: {e}")
+            continue
+    
+    return min_mse_data, mean_mse_data, selected_steps_data
+
+
 def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
     """Plot minimum MSE vs task shift and mean MSE over context length for last iteration for multiple runs.
     
@@ -1059,133 +1229,26 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         print("No run paths provided for minimum MSE analysis")
         return
     
-    # Helper function to collect data for a specific baseline
-    def collect_mse_data_for_baseline(baseline_type: str, run_labels: list = None) -> tuple[dict, dict, dict]:
-        """Collect MSE data for a specific baseline type (True or Ridge)"""
-        min_mse_data = {}  # {run_label: [(task_center, min_mse, task_name), ...]}
-        mean_mse_data = {}  # {run_label: [(task_center, mean_mse, task_name), ...]}
-        selected_steps_data = {}  # {run_label: {task_name: (min_step, mean_step)}}
-        
-        for i, run_path in enumerate(run_paths):
-            run_path = Path(run_path)
-            
-            # Determine run label
-            if run_labels and i < len(run_labels):
-                run_label = run_labels[i]
-            else:
-                run_label = run_path.name
-            
-            # Check if this is a multirun directory or single run
-            if (run_path / "multirun.yaml").exists():
-                # This is a multirun directory - we want to analyze each subrun separately
-                subdirs = find_valid_multirun_subdirs(run_path, return_paths=True)
-                
-                # Extract parameter names from multirun.yaml if no custom labels provided
-                if run_labels is None:
-                    param_names = create_run_display_names(run_path, [subdir.name for subdir in subdirs])
-                    if param_names:
-                        run_labels = [param_names.get(int(subdir.name), subdir.name) for subdir in subdirs]
-                
-                # Process each subrun as a separate run
-                for subdir_idx, subdir in enumerate(subdirs):
-                    # Load config and log for this subrun
-                    config_path = subdir / "config.json"
-                    log_path = subdir / "log.json"
-                    
-                    if not config_path.exists() or not log_path.exists():
-                        continue
-                    
-                    with open(config_path, 'r') as f:
-                        config = json.load(f)
-                    log = load_log_with_safetensors(subdir)
-                    
-                    # Extract task centers from config
-                    task_centers = config.get('eval', {}).get('task_centers', [])
-                    
-                    # Extract minimum MSE and mean MSE over context length for all tasks
-                    min_mse_params, mean_mse_params, selected_steps = extract_min_mse_params_for_baseline(log, baseline_type, return_selected_steps=True)
-                    
-                    # Create run data for this subrun
-                    if run_labels and subdir_idx < len(run_labels):
-                        # Use custom name for this subrun
-                        subrun_label = run_labels[subdir_idx].strip()
-                    else:
-                        subrun_label = f"{run_label}-{subdir.name}"
-                    min_mse_run_data = []
-                    mean_mse_run_data = []
-                    
-                    # Add Test tasks (task center = 0)
-                    if "Test tasks" in min_mse_params:
-                        min_mse = min_mse_params["Test tasks"]
-                        mean_mse = mean_mse_params.get("Test tasks", 0)
-                        min_mse_run_data.append((0.0, min_mse, "Test tasks"))
-                        mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
-                    
-                    # Add Fixed tasks
-                    for task_center in task_centers:
-                        task_name = f"Fixed task {task_center}"
-                        if task_name in min_mse_params:
-                            min_mse = min_mse_params[task_name]
-                            mean_mse = mean_mse_params.get(task_name, 0)
-                            min_mse_run_data.append((task_center, min_mse, task_name))
-                            mean_mse_run_data.append((task_center, mean_mse, task_name))
-                    
-                    if min_mse_run_data:
-                        min_mse_data[subrun_label] = min_mse_run_data
-                        mean_mse_data[subrun_label] = mean_mse_run_data
-                        selected_steps_data[subrun_label] = selected_steps
-            
-            elif (run_path / "log.json").exists():
-                # This is a single run
-                config_path = run_path / "config.json"
-                log_path = run_path / "log.json"
-                
-                if not config_path.exists():
-                    continue
-                
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                log = load_log_with_safetensors(run_path)
-                
-                # Extract task centers from config
-                task_centers = config.get('eval', {}).get('task_centers', [])
-                
-                # Extract minimum MSE and mean MSE over context length for all tasks
-                min_mse_params, mean_mse_params, selected_steps = extract_min_mse_params_for_baseline(log, baseline_type, return_selected_steps=True)
-                
-                min_mse_run_data = []
-                mean_mse_run_data = []
-                
-                # Add Test tasks (task center = 0)
-                if "Test tasks" in min_mse_params:
-                    min_mse = min_mse_params["Test tasks"]
-                    mean_mse = mean_mse_params.get("Test tasks", 0)
-                    min_mse_run_data.append((0.0, min_mse, "Test tasks"))
-                    mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
-                
-                # Add Fixed tasks
-                for task_center in task_centers:
-                    task_name = f"Fixed task {task_center}"
-                    if task_name in min_mse_params:
-                        min_mse = min_mse_params[task_name]
-                        mean_mse = mean_mse_params.get(task_name, 0)
-                        min_mse_run_data.append((task_center, min_mse, task_name))
-                        mean_mse_run_data.append((task_center, mean_mse, task_name))
-                
-                if min_mse_run_data:
-                    min_mse_data[run_label] = min_mse_run_data
-                    mean_mse_data[run_label] = mean_mse_run_data
-                    selected_steps_data[run_label] = selected_steps
-            
-            else:
-                print(f"Warning: {run_path} is neither a valid run nor multirun directory")
-                continue
-        
-        return min_mse_data, mean_mse_data, selected_steps_data
+    # PHASE 1: Load all data once (eliminates duplicate I/O)
+    print("Loading all log files...")
+    loaded_data = load_all_logs(run_paths, run_labels)
     
-    # Check which baselines are available
-    ridge_min_data, ridge_mean_data, ridge_steps_data = collect_mse_data_for_baseline('Ridge', run_labels = run_labels)
-    true_min_data, true_mean_data, true_steps_data = collect_mse_data_for_baseline('True', run_labels = run_labels)
+    if not loaded_data['logs']:
+        print("No valid log data found")
+        return
+    
+    # PHASE 2: Process data for each baseline (no I/O, uses cached logs)
+    print("Processing Ridge baseline...")
+    ridge_min_data, ridge_mean_data, ridge_steps_data = process_loaded_data_for_baseline(loaded_data, 'Ridge')
+    
+    print("Processing True baseline...")
+    true_min_data, true_mean_data, true_steps_data = process_loaded_data_for_baseline(loaded_data, 'True')
+    
+    # PHASE 3: Free memory by clearing loaded data
+    try:
+        del loaded_data
+    except:
+        pass  # Ignore deletion errors
     
     # Determine which plots to create
     create_ridge_plot = bool(ridge_min_data)
