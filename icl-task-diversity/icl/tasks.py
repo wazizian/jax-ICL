@@ -173,13 +173,14 @@ def task_log_weights(
         use_weights: bool = False,
         reduce_axis: int = -1
         ) -> Array:
-    return \
+    res = \
         aux_task_log_weights(
            tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
             ) \
         - aux_task_log_weights(
             tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
             )
+    return jnp.clip(res, 0., None)  # Ensure non-negative log weights  
 
 
 ########################################################################################################################

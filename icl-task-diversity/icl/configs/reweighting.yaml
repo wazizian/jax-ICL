@@ -20,7 +20,7 @@ task:
   clip: null
   use_weights: false
   use_weight_sampling: false
-  eval_ridge: true
+  eval_ridge: false
   distrib_name: student
   distrib_param: .inf
 
