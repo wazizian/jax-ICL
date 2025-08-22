@@ -375,7 +375,7 @@ def compute_auc_trapz(x_values: jnp.ndarray, y_values: jnp.ndarray) -> float:
 @partial(jit, static_argnames=('num_steps', 'num_tasks'))
 def find_best_step_by_auc(all_min_mse: jnp.ndarray, all_mean_mse: jnp.ndarray, all_end_mse: jnp.ndarray,
                          shift_distances: jnp.ndarray, num_steps: int, num_tasks: int) -> tuple[int, int, int]:
-    """Find evaluation steps with minimal AUC for min, mean, and end MSE over shift distance (JIT compiled).
+    """Find evaluation steps with minimal AUC for log of min, mean, and end MSE over shift distance (JIT compiled).
     
     Args:
         all_min_mse: Array of shape (num_steps, num_tasks) with min MSE values
@@ -389,9 +389,14 @@ def find_best_step_by_auc(all_min_mse: jnp.ndarray, all_mean_mse: jnp.ndarray, a
         tuple: (best_step_for_min_mse, best_step_for_mean_mse, best_step_for_end_mse)
     """
     def compute_step_auc(step_idx):
-        min_auc = compute_auc_trapz(shift_distances, all_min_mse[step_idx])
-        mean_auc = compute_auc_trapz(shift_distances, all_mean_mse[step_idx]) 
-        end_auc = compute_auc_trapz(shift_distances, all_end_mse[step_idx])
+        # Take logarithm of MSE values before computing AUC
+        min_log_mse = jnp.log(all_min_mse[step_idx])
+        mean_log_mse = jnp.log(all_mean_mse[step_idx])
+        end_log_mse = jnp.log(all_end_mse[step_idx])
+        
+        min_auc = compute_auc_trapz(shift_distances, min_log_mse)
+        mean_auc = compute_auc_trapz(shift_distances, mean_log_mse) 
+        end_auc = compute_auc_trapz(shift_distances, end_log_mse)
         return min_auc, mean_auc, end_auc
     
     # Vectorized computation across all steps
@@ -405,7 +410,7 @@ def find_best_step_by_auc(all_min_mse: jnp.ndarray, all_mean_mse: jnp.ndarray, a
 
 
 def extract_min_mse_params_for_baseline(log: dict, baseline_type: str, return_selected_steps: bool = False) -> tuple[dict, dict, dict] | tuple[dict, dict, dict, dict]:
-    """Extract minimum MSE over context length, mean MSE over context length, and end MSE for iteration with minimal AUC over shift distance for all tasks for a specific baseline.
+    """Extract minimum MSE over context length, mean MSE over context length, and end MSE for iteration with minimal AUC of log MSE over shift distance for all tasks for a specific baseline.
     
     Args:
         log: The log dictionary
@@ -527,7 +532,7 @@ def extract_min_mse_params_for_baseline(log: dict, baseline_type: str, return_se
 
 
 def extract_min_mse_params(log: dict) -> tuple[dict, dict, dict]:
-    """Extract minimum MSE over context length, mean MSE over context length, and end MSE for iteration with minimal AUC over shift distance for all tasks.
+    """Extract minimum MSE over context length, mean MSE over context length, and end MSE for iteration with minimal AUC of log MSE over shift distance for all tasks.
     
     Returns:
         tuple: (min_mse_dict, mean_mse_dict, end_mse_dict) where:
