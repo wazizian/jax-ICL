@@ -184,6 +184,9 @@ def train(config: ConfigDict) -> None:
     model = get_model(**config.model, dtype=jnp.dtype(config.dtype))
     logging.info(u.tabulate_model(model, config.task.n_dims, config.model.n_points, config.task.batch_size))
     params, dropout_rng = initialize(model, config)
+    clip_max_norm = config.training.get("clip_max_norm", float("inf"))
+    if "clip_max_norm" not in config.training:
+        config.training.clip_max_norm = clip_max_norm
     tx, lr = get_optimizer_and_lr_schedule(**config.training, params=params)
     logging.info("Initialized Model, Optimizer and LR Schedule")
 
@@ -214,7 +217,6 @@ def train(config: ConfigDict) -> None:
     logging.info("Pmap'd Steps")
 
     use_weights = config.task.use_weights
-    clip_max_norm = config.training.get("clip_max_norm", 1.0)
     alpha0 = config.training.get("alpha0", 0.5)
     T_ramp_ratio = config.training.get("T_ramp_ratio", 0.4)
 

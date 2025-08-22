@@ -1232,7 +1232,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 # Get a representative step for min MSE (use first task's min step)
                 first_task_steps = next(iter(steps_info.values()), (None, None))
                 min_step = first_task_steps[0]
-                label_with_step = f"{run_label} (min step: {min_step})" if min_step is not None else run_label
+                label_with_step = f"{run_label} (best step: {min_step})" if min_step is not None else run_label
             else:
                 label_with_step = run_label
             
@@ -1267,7 +1267,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 # Get a representative step for mean MSE (use first task's mean step)
                 first_task_steps = next(iter(steps_info.values()), (None, None))
                 mean_step = first_task_steps[1]
-                label_with_step = f"{run_label} (mean step: {mean_step})" if mean_step is not None else run_label
+                label_with_step = f"{run_label} (best step: {mean_step})" if mean_step is not None else run_label
             else:
                 label_with_step = run_label
             

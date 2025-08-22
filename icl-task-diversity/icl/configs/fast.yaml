@@ -40,7 +40,7 @@ training:
   schedule: triangle
   warmup_steps: 10
   total_steps: 20
-  clip_max_norm: 1.0
+  clip_max_norm: null
 
 eval:
   n_samples: 16

@@ -45,6 +45,7 @@ def get_optimizer_and_lr_schedule(
         raise NotImplementedError
     
     # Add gradient clipping
+    print(f"Using optimizer: {optimizer}, schedule: {schedule}, clip_max_norm: {clip_max_norm}")
     tx = optax.chain(
         optax.clip_by_global_norm(clip_max_norm),
         tx
