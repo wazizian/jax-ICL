@@ -180,7 +180,7 @@ def task_log_weights(
         - aux_task_log_weights(
             tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
             )
-    return jnp.clip(res, 0., None)  # Ensure non-negative log weights  
+    return res
 
 
 ########################################################################################################################
