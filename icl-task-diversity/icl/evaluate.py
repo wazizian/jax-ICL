@@ -79,7 +79,7 @@ def get_bsln_preds(train_task: Task, j_batch_samplers: dict[str, Sampler], n_sam
             n_points = ys.shape[2]
             target_shape = ys.shape[1:]  # (batch_size, n_points,) or (batch_size, n_points, n_dims)
             new_shape = (ys.shape[0] * ys.shape[1],) + target_shape[2:]  # (batch_size * n_devices, n_points,) or (batch_size * n_devices, n_points, n_dims)
-            preds[task_name]["True"].append(p_oracle(xs, ws).reshape(target_shape))
+            preds[task_name]["True"].append(p_oracle(xs, ws).reshape(new_shape))
             for model_name, p_model in p_bsln_models.items():  # ...for baseline models
                 # print(f"Evaluating {model_name} on {task_name} batch {i} with {xs.shape[0]} samples and {n_points} points ({xs.shape = }, {ws.shape = }, {ys.shape = })")
                 preds[task_name][model_name].append(p_model(xs, ys).reshape(new_shape))
