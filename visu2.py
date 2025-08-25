@@ -193,25 +193,37 @@ base_Z = jax.random.normal(base_key, (n_samples, d))  # ~ N(0, I)
 
 # Generate empirical samples if needed
 if args.discrete:
+    n_repeats = 5
     empirical_samples = {}
     for nu in nus:
-        key, subkey = jax.random.split(key)
-        if jnp.isinf(nu):
-            # Sample from N(0, I_d)
-            empirical_samples[nu] = jax.random.normal(subkey, (args.discrete, d))
-        else:
-            # Sample from variance-normalized Student-t
-            t_samples = jax.random.t(subkey, float(nu), (args.discrete, d))
-            scale = jnp.sqrt((nu - 2.0) / nu)  # variance-normalizing scale
-            empirical_samples[nu] = t_samples * scale
+        empirical_samples[nu] = []
+        for repeat in range(n_repeats):
+            key, subkey = jax.random.split(key)
+            if jnp.isinf(nu):
+                # Sample from N(0, I_d)
+                samples = jax.random.normal(subkey, (args.discrete, d))
+            else:
+                # Sample from variance-normalized Student-t
+                t_samples = jax.random.t(subkey, float(nu), (args.discrete, d))
+                scale = jnp.sqrt((nu - 2.0) / nu)  # variance-normalizing scale
+                samples = t_samples * scale
+            empirical_samples[nu].append(samples)
 
 results = {}
 for nu in nus:
     if args.discrete:
-        # Use empirical sampling
+        # Use empirical sampling with averaging over 5 repetitions
         is_nu_inf = bool(jnp.isinf(nu))
         nu_val = float('inf') if is_nu_inf else float(nu)
-        y = neg_log_mgf_empirical_for_nu(empirical_samples[nu], nu_val, is_nu_inf, C, x_grid)
+        
+        # Run 5 times and average
+        y_values = []
+        for repeat in range(n_repeats):
+            y_rep = neg_log_mgf_empirical_for_nu(empirical_samples[nu][repeat], nu_val, is_nu_inf, C, x_grid)
+            y_values.append(y_rep)
+        
+        # Average the results
+        y = jnp.mean(jnp.stack(y_values), axis=0)
     else:
         # Use importance sampling (original approach)
         if jnp.isinf(nu):
