@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import time
 import optax
+import chex
 
 import jax
 import jax.numpy as jnp
@@ -109,6 +110,7 @@ def train_step(state: TrainState,
     (loss, _), grads = grad_fn(state.params, weights)
     grads = jax.lax.pmean(grads, axis_name="device")
     loss = jax.lax.pmean(loss, axis_name="device")
+    chex.assert_shape(loss, ())
     state = state.apply_gradients(grads=grads)
     global_norm = optax.global_norm(grads)
     diagnostics['grad_norm'] = global_norm 
@@ -260,6 +262,7 @@ def train(config: ConfigDict) -> None:
                     clip_max_norm
                     )
                 )
+        loss = jax_utils.unreplicate(loss)
         train_losses.append(loss.item())
         log["train/step"].append(i)
         log["train/lr"].append(float(lr(i)))

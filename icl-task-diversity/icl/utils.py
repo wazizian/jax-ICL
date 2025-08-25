@@ -1,6 +1,7 @@
 import hashlib
 import json
 
+from flax import jax_utils
 import jax.numpy as jnp
 import jax.random as jr
 from jax import Array
@@ -101,5 +102,6 @@ def tabulate_model(model: Transformer | SingleSeqTransformer, n_dims: int, n_poi
 
 def to_float(x):
     if isinstance(x, jnp.ndarray):
+        x = jax_utils.unreplicate(x)
         return float(x.item())
     return float(x)
