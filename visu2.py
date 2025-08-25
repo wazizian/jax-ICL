@@ -2,6 +2,13 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from functools import partial
+import argparse
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Visualize ICL error bounds')
+parser.add_argument('--discrete', type=int, metavar='N', 
+                    help='Use empirical sampling with N samples instead of importance sampling')
+args = parser.parse_args()
 
 # Problem setup
 d = 8
@@ -62,6 +69,30 @@ def neg_log_mgf_IS_for_nu(base_Z, nu, is_nu_inf, C, x_grid):
         m = jax.scipy.special.logsumexp(log_integrand) - jnp.log(n)
         return -m  # negative log expectation
 
+    return jax.vmap(per_x)(x_grid)
+
+# ---------- Empirical sampling estimator ----------
+@partial(jax.jit, static_argnums=(1, 2))
+def neg_log_mgf_empirical_for_nu(base_theta, nu, is_nu_inf, C, x_grid):
+    """
+    Empirical sampling version: use pre-sampled theta from Student-t (or Normal) distribution.
+    For each x, estimate E_p[exp(-C ||theta - x||^2)] using direct samples from p.
+    base_theta has shape (n_empirical, d) and contains samples from the target distribution.
+    Returns vector over x_grid of -log expectation.
+    Uses log-sum-exp for numerical stability.
+    """
+    def per_x(x):
+        # Compute log integrand: -C ||theta - x||^2
+        ones = jnp.ones((1, d))
+        quad = jnp.sum((base_theta - x * ones)**2, axis=-1)
+        log_integrand = -C * quad
+        
+        # Monte Carlo expectation using log-sum-exp
+        # log E[exp(log_integrand)] = logsumexp(log_integrand) - log(n_samples)
+        n_samples = base_theta.shape[0]
+        log_expectation = jax.scipy.special.logsumexp(log_integrand) - jnp.log(n_samples)
+        return -log_expectation  # negative log expectation
+    
     return jax.vmap(per_x)(x_grid)
 
 # ---------- Analytic Normal baseline (optional) ----------
@@ -160,15 +191,36 @@ def log_sum_student_interval_prob_alpha(beta, delta, alpha, scale, df, d, max_ab
 base_key, = jax.random.split(key, 1)
 base_Z = jax.random.normal(base_key, (n_samples, d))  # ~ N(0, I)
 
+# Generate empirical samples if needed
+if args.discrete:
+    empirical_samples = {}
+    for nu in nus:
+        key, subkey = jax.random.split(key)
+        if jnp.isinf(nu):
+            # Sample from N(0, I_d)
+            empirical_samples[nu] = jax.random.normal(subkey, (args.discrete, d))
+        else:
+            # Sample from variance-normalized Student-t
+            t_samples = jax.random.t(subkey, float(nu), (args.discrete, d))
+            scale = jnp.sqrt((nu - 2.0) / nu)  # variance-normalizing scale
+            empirical_samples[nu] = t_samples * scale
+
 results = {}
 for nu in nus:
-    if jnp.isinf(nu):
-        # You can either use IS like others, or the exact closed form:
-        y = neg_log_expect_normal(d, C, x_grid)
-        # If you want IS as well for ν=∞, uncomment:
-        # y = neg_log_mgf_IS_for_nu(base_Z, nu, C, x_grid)
+    if args.discrete:
+        # Use empirical sampling
+        is_nu_inf = bool(jnp.isinf(nu))
+        nu_val = float('inf') if is_nu_inf else float(nu)
+        y = neg_log_mgf_empirical_for_nu(empirical_samples[nu], nu_val, is_nu_inf, C, x_grid)
     else:
-        y = neg_log_mgf_IS_for_nu(base_Z, float(nu), False, C, x_grid)
+        # Use importance sampling (original approach)
+        if jnp.isinf(nu):
+            # You can either use IS like others, or the exact closed form:
+            y = neg_log_expect_normal(d, C, x_grid)
+            # If you want IS as well for ν=∞, uncomment:
+            # y = neg_log_mgf_IS_for_nu(base_Z, nu, C, x_grid)
+        else:
+            y = neg_log_mgf_IS_for_nu(base_Z, float(nu), False, C, x_grid)
     z = y + 0.01* log_sum_student_interval_prob_alpha(0.5, 0.1, 2, jnp.sqrt((nu - 2.0) / nu), nu, d) 
     results[nu] = y / C
 
@@ -176,7 +228,8 @@ rho = 0.5
 sigma = 0.5
 new_results = {}
 for nu, res in results.items():
-    new_res = (jnp.exp(2 * res)  - 1) * (sigma**2 / (rho * ( 1 - rho)))
+    new_res = res #(jnp.exp(2 * res)  - 1) * (sigma**2 / (rho * ( 1 - rho)))
+    print(f"nu={nu}, min={jnp.min(new_res)}, max={jnp.max(new_res)}")
     new_results[nu] = new_res
 
 # ---------- Plot ----------
@@ -190,6 +243,7 @@ for nu in nus:
     marker_x = x_grid[marker_indices]
     marker_y = new_results[nu][marker_indices]
     plt.plot(marker_x, marker_y, 'o', color=colors[nu], markersize=4)
+    plt.xlim(x_grid[0], x_grid[-1])
 
 plt.xlabel("Task shift")
 plt.ylabel("Theory bound on ICL error")
@@ -204,17 +258,34 @@ plt.show()
 
 C_grid = jnp.linspace(1, C, 200)
 x_small_grid = jnp.linspace(0.0, 3.0, 10)
-neg_log_expect_normal_vmaped = jax.vmap(partial(neg_log_expect_normal, d), in_axes=(0, None))
-neg_log_mgf_IS_for_nu_vmaped = jax.vmap(partial(neg_log_mgf_IS_for_nu, base_Z), in_axes=(None, None, 0, None))
+
+if args.discrete:
+    # Create vmapped version of empirical function that reuses samples
+    def create_empirical_vmaped(base_theta):
+        return jax.vmap(partial(neg_log_mgf_empirical_for_nu, base_theta), in_axes=(None, None, 0, None))
+else:
+    # Use original importance sampling approach
+    neg_log_expect_normal_vmaped = jax.vmap(partial(neg_log_expect_normal, d), in_axes=(0, None))
+    neg_log_mgf_IS_for_nu_vmaped = jax.vmap(partial(neg_log_mgf_IS_for_nu, base_Z), in_axes=(None, None, 0, None))
 
 
 for nu in nus:
     key, subkey = jax.random.split(key)
     plt.figure(figsize=(12, 8))
-    if jnp.isinf(nu):
-        all_y_vals = neg_log_expect_normal_vmaped(C_grid, x_small_grid)
+    
+    if args.discrete:
+        # Use empirical sampling with pre-generated samples
+        is_nu_inf = bool(jnp.isinf(nu))
+        nu_val = float('inf') if is_nu_inf else float(nu)
+        neg_log_mgf_empirical_vmaped = create_empirical_vmaped(empirical_samples[nu])
+        all_y_vals = neg_log_mgf_empirical_vmaped(nu_val, is_nu_inf, C_grid, x_small_grid)
     else:
-        all_y_vals = neg_log_mgf_IS_for_nu_vmaped(float(nu), False, C_grid, x_small_grid)
+        # Use importance sampling (original approach)
+        if jnp.isinf(nu):
+            all_y_vals = neg_log_expect_normal_vmaped(C_grid, x_small_grid)
+        else:
+            all_y_vals = neg_log_mgf_IS_for_nu_vmaped(float(nu), False, C_grid, x_small_grid)
+    
     all_y_vals = all_y_vals / C_grid[:, None]  # normalize by C
     for i, x in enumerate(x_small_grid):
         plt.plot(C_grid.flatten(), all_y_vals[:, i], label=f"Shift={x:.1f}", linewidth=2)
