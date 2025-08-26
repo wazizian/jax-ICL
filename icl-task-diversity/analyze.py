@@ -1336,7 +1336,6 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         ax1.set_title(f"Best MSE vs {baseline_type} Baseline vs Task Shift")
         ax1.grid(True, alpha=0.3)
         ax1.set_yscale('log')
-        ax1.legend()
         
         # Plot mean MSE over context length data (right subplot)
         for i, (run_label, run_data) in enumerate(mean_mse_data.items()):
@@ -1371,7 +1370,6 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         ax2.set_title(f"Mean MSE vs {baseline_type} Baseline vs Task Shift")
         ax2.grid(True, alpha=0.3)
         ax2.set_yscale('log')
-        ax2.legend()
         
         # Plot end MSE data (third subplot)
         for i, (run_label, run_data) in enumerate(end_mse_data.items()):
@@ -1406,9 +1404,18 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         ax3.set_title(f"End MSE vs {baseline_type} Baseline vs Task Shift")
         ax3.grid(True, alpha=0.3)
         ax3.set_yscale('log')
-        ax3.legend()
+        
+        # Add legend below plots
+        handles1, labels1 = ax1.get_legend_handles_labels()
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        handles3, labels3 = ax3.get_legend_handles_labels()
+        
+        # Use handles and labels from first subplot (they should be the same)
+        fig.legend(handles1, labels1, loc='lower center', ncol=min(len(labels1), 4), 
+                  bbox_to_anchor=(0.5, -0.02))
         
         plt.tight_layout()
+        plt.subplots_adjust(bottom=0.15)
         
         # Save plot
         if output_dir is None:

@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from functools import partial
 import argparse
+from tqdm import tqdm
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Visualize ICL error bounds')
@@ -11,12 +12,12 @@ parser.add_argument('--discrete', type=int, metavar='N',
 args = parser.parse_args()
 
 # Problem setup
-d = 8
-C = 128.0 * 2 * 0.1
+d = 4
+C = 128.0 * 2 * 0.001
 nus = [3.0, 5.0, 10.0, jnp.inf]
-x_grid = jnp.linspace(0.0, 4.0, 500)
+x_grid = jnp.linspace(0.0, 5.0, 500)
 n_samples = 200_000
-key = jax.random.PRNGKey(0)
+key = jax.random.PRNGKey(1)
 
 # ---------- log densities ----------
 def log_pdf_student_var1_per_coord(y, nu, is_nu_inf):
@@ -193,37 +194,43 @@ base_Z = jax.random.normal(base_key, (n_samples, d))  # ~ N(0, I)
 
 # Generate empirical samples if needed
 if args.discrete:
-    n_repeats = 5
+    n_repeats = 3
     empirical_samples = {}
-    for nu in nus:
-        empirical_samples[nu] = []
-        for repeat in range(n_repeats):
-            key, subkey = jax.random.split(key)
-            if jnp.isinf(nu):
-                # Sample from N(0, I_d)
-                samples = jax.random.normal(subkey, (args.discrete, d))
-            else:
-                # Sample from variance-normalized Student-t
-                t_samples = jax.random.t(subkey, float(nu), (args.discrete, d))
+    print("Generating empirical samples...")
+    for nu in tqdm(nus, desc="Sampling for each ν"):
+        # Generate n_repeats sets of keys for vectorized sampling
+        keys = jax.random.split(key, n_repeats + 1)
+        key = keys[0]  # Update main key
+        subkeys = keys[1:]
+        
+        if jnp.isinf(nu):
+            # Vectorized sampling from N(0, I_d) - shape: (n_repeats, args.discrete, d)
+            samples_all = jax.vmap(lambda k: jax.random.normal(k, (args.discrete, d)))(subkeys)
+        else:
+            # Vectorized sampling from variance-normalized Student-t
+            def sample_student_t(k):
+                t_samples = jax.random.t(k, float(nu), (args.discrete, d))
                 scale = jnp.sqrt((nu - 2.0) / nu)  # variance-normalizing scale
-                samples = t_samples * scale
-            empirical_samples[nu].append(samples)
+                return t_samples * scale
+            samples_all = jax.vmap(sample_student_t)(subkeys)
+        
+        empirical_samples[nu] = samples_all  # Shape: (n_repeats, args.discrete, d)
 
 results = {}
-for nu in nus:
+print("Computing main results...")
+for nu in tqdm(nus, desc="Computing for each ν"):
     if args.discrete:
-        # Use empirical sampling with averaging over 5 repetitions
+        # Use empirical sampling with averaging over n_repeats repetitions
         is_nu_inf = bool(jnp.isinf(nu))
         nu_val = float('inf') if is_nu_inf else float(nu)
         
-        # Run 5 times and average
-        y_values = []
-        for repeat in range(n_repeats):
-            y_rep = neg_log_mgf_empirical_for_nu(empirical_samples[nu][repeat], nu_val, is_nu_inf, C, x_grid)
-            y_values.append(y_rep)
+        # Vectorized computation over all repetitions
+        def compute_single_repeat(samples):
+            return neg_log_mgf_empirical_for_nu(samples, nu_val, is_nu_inf, C, x_grid)
         
-        # Average the results
-        y = jnp.mean(jnp.stack(y_values), axis=0)
+        # Apply to all repetitions and average - shape: (n_repeats, len(x_grid))
+        y_all = jax.vmap(compute_single_repeat)(empirical_samples[nu])
+        y = jnp.mean(y_all, axis=0)
     else:
         # Use importance sampling (original approach)
         if jnp.isinf(nu):
@@ -281,16 +288,24 @@ else:
     neg_log_mgf_IS_for_nu_vmaped = jax.vmap(partial(neg_log_mgf_IS_for_nu, base_Z), in_axes=(None, None, 0, None))
 
 
-for nu in nus:
+print("Generating secondary plots...")
+for nu in tqdm(nus, desc="Plotting for each ν"):
     key, subkey = jax.random.split(key)
     plt.figure(figsize=(12, 8))
     
     if args.discrete:
-        # Use empirical sampling with pre-generated samples
+        # Use empirical sampling with pre-generated samples, averaged over n_repeats repetitions
         is_nu_inf = bool(jnp.isinf(nu))
         nu_val = float('inf') if is_nu_inf else float(nu)
-        neg_log_mgf_empirical_vmaped = create_empirical_vmaped(empirical_samples[nu])
-        all_y_vals = neg_log_mgf_empirical_vmaped(nu_val, is_nu_inf, C_grid, x_small_grid)
+        
+        # Vectorized computation over all repetitions for each C value
+        def compute_single_repeat_vmaped(samples):
+            neg_log_mgf_empirical_vmaped = create_empirical_vmaped(samples)
+            return neg_log_mgf_empirical_vmaped(nu_val, is_nu_inf, C_grid, x_small_grid)
+        
+        # Apply to all repetitions and average - shape: (n_repeats, len(C_grid), len(x_small_grid))
+        all_y_vals_all = jax.vmap(compute_single_repeat_vmaped)(empirical_samples[nu])
+        all_y_vals = jnp.mean(all_y_vals_all, axis=0)
     else:
         # Use importance sampling (original approach)
         if jnp.isinf(nu):
