@@ -76,6 +76,9 @@ eval:
 # Hydra settings
 hydra:
   mode: MULTIRUN
+  callbacks:
+    save_job_info:
+      _target_: hydra.experimental.callbacks.PickleJobInfoCallback
   run:
     dir: ${output_dir}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
@@ -84,5 +87,5 @@ hydra:
   sweeper:
     params:
       # task.distrib_param: inf
-      task.use_weights: true, false
+      task.use_weights: false
       task.distrib_param: 3.0, 5.0, 10.0, inf
