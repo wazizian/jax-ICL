@@ -20,7 +20,7 @@ from hydra.core.hydra_config import HydraConfig
 from safetensors.numpy import save_file
 
 import icl.utils as u
-from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_error, error_per_sample_and_seq_pos
+from icl.evaluate import Preds, get_bsln_preds, get_model_preds, mse, relative_error, error_per_sample_and_seq_pos, sum_except_dim
 from icl.models import Transformer, SingleSeqTransformer, get_model
 from icl.optim import get_optimizer_and_lr_schedule
 from icl.tasks import Sampler, Task, get_task, get_task_name
@@ -96,7 +96,10 @@ def train_step(state: TrainState,
     def loss_fn(params, weights):
         preds = state.apply_fn({"params": params}, data, targets, attention_mask, training=True, rngs={"dropout": dropout_rng})
         # Compute weighted loss: weights should have shape (batch_size,)
-        batch_losses = jnp.square(preds - targets).mean(axis=1)  # Mean over sequence length
+        # batch_losses = jnp.square(preds - targets).mean(axis=1)  # Mean over sequence length
+        # Sum  over dims if exists and over seq length
+        seq_len = targets.shape[1]
+        batch_losses = sum_except_dim(jnp.square(preds - targets), 0) / seq_len  # Mean over sequence length
         # jax.debug.print("Weights: mean={}, median={}, min={}, max={}",
         #                jnp.mean(weights), jnp.median(weights), jnp.min(weights), jnp.max(weights))
         if use_weights:
