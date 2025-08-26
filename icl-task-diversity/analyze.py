@@ -988,8 +988,6 @@ def plot_weights_analysis_multirun(run_paths: list, output_dir: Path = None, run
     # Choose colormap based on number of runs
     num_runs = len(runs_with_weights)
     if num_runs > 10:
-        # Use colormap for many runs
-        import matplotlib.pyplot as plt
         cmap = plt.get_cmap('tab20' if num_runs <= 20 else 'hsv')
         colors = [cmap(i / num_runs) for i in range(num_runs)]
     else:
@@ -1209,7 +1207,6 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
     num_runs = len(data)
     if num_runs > 10:
         # Use colormap for many runs
-        import matplotlib.pyplot as plt
         cmap = plt.get_cmap('tab20' if num_runs <= 20 else 'hsv')
         colors = [cmap(i / num_runs) for i in range(num_runs)]
     else:
@@ -1507,7 +1504,6 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         num_runs = len(min_mse_data)
         if num_runs > 10:
             # Use colormap for many runs
-            import matplotlib.pyplot as plt
             cmap = plt.get_cmap('tab20' if num_runs <= 20 else 'hsv')
             colors = [cmap(i / num_runs) for i in range(num_runs)]
         else:
