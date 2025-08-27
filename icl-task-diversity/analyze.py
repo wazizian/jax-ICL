@@ -409,6 +409,101 @@ def find_best_step_by_auc(all_min_mse: jnp.ndarray, all_mean_mse: jnp.ndarray, a
     return best_min_step, best_mean_step, best_end_step
 
 
+def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
+    """Compute the best AUC (minimal mean MSE AUC) for a given baseline type.
+    
+    Args:
+        log: The log dictionary
+        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
+        
+    Returns:
+        float: The minimal mean MSE AUC value, or float('inf') if computation fails
+    """
+    try:
+        # Reuse the existing logic from extract_min_mse_params_for_baseline
+        eval_steps = log.get("eval/step", [])
+        if not eval_steps:
+            return float('inf')
+        
+        # Extract evaluation metrics for all steps
+        eval_metrics = {}
+        for key, value in log.items():
+            if key.startswith("eval/") and key != "eval/step":
+                task_name = key.split("/")[1]
+                if task_name not in eval_metrics:
+                    eval_metrics[task_name] = {}
+                for metric_name, metric_values in value.items():
+                    eval_metrics[task_name][metric_name] = metric_values
+        
+        # Find tasks that match our criteria and baseline
+        task_data = {}
+        for task_name, metrics in eval_metrics.items():
+            if task_name == "Test tasks" or task_name.startswith("Fixed task"):
+                selected_metric = None
+                for metric_name, values in metrics.items():
+                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                        selected_metric = (metric_name, values)
+                        break
+                
+                if selected_metric:
+                    metric_name, values = selected_metric
+                    shift_distance = extract_task_shift_distance(task_name)
+                    task_data[task_name] = (shift_distance, values)
+        
+        if not task_data:
+            return float('inf')
+        
+        # Sort tasks by shift distance for consistent ordering
+        sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
+        task_names = [task_name for task_name, _ in sorted_tasks]
+        shift_distances = jnp.array([shift_dist for _, (shift_dist, _) in sorted_tasks])
+        
+        # Collect MSE data for all steps and tasks
+        num_steps = len(eval_steps)
+        num_tasks = len(sorted_tasks)
+        
+        all_min_mse = np.zeros((num_steps, num_tasks))
+        all_mean_mse = np.zeros((num_steps, num_tasks))
+        all_end_mse = np.zeros((num_steps, num_tasks))
+        
+        for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
+            for step_idx in range(num_steps):
+                if step_idx < len(values):
+                    mse_values = normalize_error_values(values[step_idx])
+                    if mse_values is not None and len(mse_values) > 0:
+                        mse_jax = jnp.array(mse_values)
+                        min_mse, mean_mse, end_mse = compute_min_mean_end_mse_over_context(mse_jax)
+                        all_min_mse[step_idx, task_idx] = float(min_mse)
+                        all_mean_mse[step_idx, task_idx] = float(mean_mse)
+                        all_end_mse[step_idx, task_idx] = float(end_mse)
+                    else:
+                        all_min_mse[step_idx, task_idx] = float('inf')
+                        all_mean_mse[step_idx, task_idx] = float('inf')
+                        all_end_mse[step_idx, task_idx] = float('inf')
+                else:
+                    all_min_mse[step_idx, task_idx] = float('inf')
+                    all_mean_mse[step_idx, task_idx] = float('inf')
+                    all_end_mse[step_idx, task_idx] = float('inf')
+        
+        # Convert to JAX arrays for optimized computation
+        all_min_mse_jax = jnp.array(all_min_mse)
+        all_mean_mse_jax = jnp.array(all_mean_mse)
+        all_end_mse_jax = jnp.array(all_end_mse)
+        
+        # Find best step and return the minimal mean AUC
+        def compute_step_auc(step_idx):
+            mean_log_mse = jnp.log(all_mean_mse_jax[step_idx])
+            return compute_auc_trapz(shift_distances, mean_log_mse)
+        
+        step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
+        min_auc = float(jnp.min(step_aucs))
+        
+        return min_auc
+        
+    except Exception as e:
+        return float('inf')
+
+
 def extract_min_mse_params_for_baseline(log: dict, baseline_type: str, return_selected_steps: bool = False) -> tuple[dict, dict, dict] | tuple[dict, dict, dict, dict]:
     """Extract minimum MSE over context length, mean MSE over context length, and end MSE for iteration with minimal AUC of log MSE over shift distance for all tasks for a specific baseline.
     
@@ -1117,6 +1212,13 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
                     print(f"Warning: No swept parameters found in {run_path}/multirun.yaml")
                     continue
                 
+                # Validate that optimize_params exist in swept_params
+                invalid_params = [param for param in optimize_params if param not in swept_params]
+                if invalid_params:
+                    print(f"Error: Parameter optimization requested for parameters not swept in multirun: {invalid_params}")
+                    print(f"Available swept parameters: {swept_params}")
+                    continue
+                
                 # Collect all run data
                 all_runs = []
                 for subdir in subdirs:
@@ -1138,23 +1240,20 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
                 # Group runs by non-optimized parameters
                 run_groups = group_runs_by_other_params(all_runs, optimize_params, swept_params)
                 
+                # Create AUC cache for performance optimization
+                auc_cache = {}
+                
                 # For each group, find best parameter combination
                 for group_key, run_group in run_groups.items():
                     best_run, best_auc, best_param_values = find_best_param_combination_by_auc(
-                        run_group, optimize_params, baseline_type='Ridge'
+                        run_group, optimize_params, 'Ridge', auc_cache
                     )
                     
                     if best_run is None:
                         continue
                     
-                    # Create display name for this group
-                    other_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in group_key])
-                    opt_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in best_param_values.items()])
-                    
-                    if other_params_str:
-                        group_label = f"{other_params_str} | BEST({opt_params_str})"
-                    else:
-                        group_label = f"BEST({opt_params_str})"
+                    # Create display name for this group using smart formatting
+                    group_label = format_parameter_legend(group_key, best_param_values)
                     
                     # Extract power law parameters for the best run
                     config = best_run['config']
@@ -1460,13 +1559,14 @@ def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
     return loaded_data
 
 
-def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = None, optimize_params: list = None) -> dict:
+def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = None, optimize_params: list = None, baseline_type: str = 'Ridge') -> dict:
     """Load all log files with parameter optimization for multirun experiments.
     
     Args:
         run_paths: List of Path objects pointing to runs or multirun subdirs
         run_labels: Custom labels for runs (optional)
         optimize_params: List of parameters to optimize over
+        baseline_type: 'Ridge' or 'True' for MSE baseline type
     
     Returns:
         dict: Same format as load_all_logs but with optimized parameter combinations
@@ -1501,6 +1601,13 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
                 print(f"Warning: No swept parameters found in {run_path}/multirun.yaml")
                 continue
             
+            # Validate that optimize_params exist in swept_params
+            invalid_params = [param for param in optimize_params if param not in swept_params]
+            if invalid_params:
+                print(f"Error: Parameter optimization requested for parameters not swept in multirun: {invalid_params}")
+                print(f"Available swept parameters: {swept_params}")
+                continue
+            
             # Collect all run data
             all_runs = []
             for subdir in subdirs:
@@ -1526,23 +1633,20 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
             # Group runs by non-optimized parameters
             run_groups = group_runs_by_other_params(all_runs, optimize_params, swept_params)
             
+            # Create AUC cache for performance optimization
+            auc_cache = {}
+            
             # For each group, find best parameter combination
             for group_key, run_group in run_groups.items():
                 best_run, best_auc, best_param_values = find_best_param_combination_by_auc(
-                    run_group, optimize_params, baseline_type='Ridge'
+                    run_group, optimize_params, baseline_type, auc_cache
                 )
                 
                 if best_run is None:
                     continue
                 
-                # Create display name for this group
-                other_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in group_key])
-                opt_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in best_param_values.items()])
-                
-                if other_params_str:
-                    group_label = f"{other_params_str} | BEST({opt_params_str})"
-                else:
-                    group_label = f"BEST({opt_params_str})"
+                # Create display name for this group using smart formatting
+                group_label = format_parameter_legend(group_key, best_param_values)
                 
                 # Store the best run's data
                 config = best_run['config']
@@ -1667,26 +1771,32 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     # PHASE 1: Load all data once (eliminates duplicate I/O)
     print("Loading all log files...")
     if optimize_params:
-        # Parameter optimization mode - load and optimize parameter combinations
-        loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params)
+        # Parameter optimization mode - load and optimize parameter combinations for both baselines
+        print("Loading with Ridge baseline optimization...")
+        ridge_loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params, 'Ridge')
+        print("Loading with True baseline optimization...")  
+        true_loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params, 'True')
     else:
         # Standard mode
         loaded_data = load_all_logs(run_paths, run_labels)
+        ridge_loaded_data = loaded_data
+        true_loaded_data = loaded_data
     
-    if not loaded_data['logs']:
+    if not ridge_loaded_data['logs'] and not true_loaded_data['logs']:
         print("No valid log data found")
         return
     
     # PHASE 2: Process data for each baseline (no I/O, uses cached logs)
     print("Processing Ridge baseline...")
-    ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data = process_loaded_data_for_baseline(loaded_data, 'Ridge')
+    ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data = process_loaded_data_for_baseline(ridge_loaded_data, 'Ridge')
     
     print("Processing True baseline...")
-    true_min_data, true_mean_data, true_end_data, true_steps_data = process_loaded_data_for_baseline(loaded_data, 'True')
+    true_min_data, true_mean_data, true_end_data, true_steps_data = process_loaded_data_for_baseline(true_loaded_data, 'True')
     
     # PHASE 3: Free memory by clearing loaded data
     try:
-        del loaded_data
+        del ridge_loaded_data
+        del true_loaded_data
     except:
         pass  # Ignore deletion errors
     
@@ -2003,13 +2113,14 @@ def group_runs_by_other_params(run_data: list, optimize_params: list, all_swept_
     return groups
 
 
-def find_best_param_combination_by_auc(run_group: list, optimize_params: list, baseline_type: str = 'Ridge') -> tuple:
+def find_best_param_combination_by_auc(run_group: list, optimize_params: list, baseline_type: str, cached_aucs: dict = None) -> tuple:
     """Find the best parameter combination within a group of runs based on AUC.
     
     Args:
         run_group: List of runs that share the same "other" parameters
         optimize_params: List of parameters to optimize over
         baseline_type: 'Ridge' or 'True' for MSE baseline type
+        cached_aucs: Optional dict of {run_name: auc_value} for performance optimization
         
     Returns:
         tuple: (best_run, best_auc, best_param_values) or (None, float('inf'), {}) if no valid runs
@@ -2025,76 +2136,20 @@ def find_best_param_combination_by_auc(run_group: list, optimize_params: list, b
             for param in optimize_params:
                 param_values[param] = get_param_value_from_config(run['config'], param)
             
-            # Get the log data and compute AUC using existing logic
-            log = run['log']
-            
-            # Use existing function to get MSE data for this baseline
-            min_mse_params, mean_mse_params, end_mse_params = extract_min_mse_params_for_baseline(log, baseline_type)
-            
-            if not min_mse_params:  # No valid data
-                continue
+            # Get AUC from cache or compute it
+            if cached_aucs and run['name'] in cached_aucs:
+                min_auc = cached_aucs[run['name']]
+            else:
+                # Compute the minimal AUC for this run using the helper function
+                log = run['log']
+                min_auc = compute_best_auc_for_baseline(log, baseline_type)
                 
-            # Calculate AUC for this run (we'll use mean MSE AUC as the optimization target)
-            # First, we need to reconstruct the task data structure to get shift distances
-            eval_steps = log.get("eval/step", [])
-            if not eval_steps:
+                # Cache the result for future use
+                if cached_aucs is not None:
+                    cached_aucs[run['name']] = min_auc
+            
+            if min_auc == float('inf'):  # No valid data
                 continue
-                
-            # Extract evaluation metrics
-            eval_metrics = {}
-            for key, value in log.items():
-                if key.startswith("eval/") and key != "eval/step":
-                    task_name = key.split("/")[1]
-                    if task_name not in eval_metrics:
-                        eval_metrics[task_name] = {}
-                    for metric_name, metric_values in value.items():
-                        eval_metrics[task_name][metric_name] = metric_values
-            
-            # Find tasks that match our criteria and baseline
-            task_data = {}
-            for task_name, metrics in eval_metrics.items():
-                if task_name == "Test tasks" or task_name.startswith("Fixed task"):
-                    for metric_name, values in metrics.items():
-                        if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
-                            shift_distance = extract_task_shift_distance(task_name)
-                            task_data[task_name] = (shift_distance, values)
-                            break
-            
-            if not task_data:
-                continue
-                
-            # Sort tasks by shift distance
-            sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
-            shift_distances = jnp.array([shift_dist for _, (shift_dist, _) in sorted_tasks])
-            
-            # Compute MSE data for all steps (similar to existing logic)
-            num_steps = len(eval_steps)
-            num_tasks = len(sorted_tasks)
-            
-            all_mean_mse = np.zeros((num_steps, num_tasks))
-            
-            for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
-                for step_idx in range(num_steps):
-                    if step_idx < len(values):
-                        mse_values = normalize_error_values(values[step_idx])
-                        if mse_values is not None and len(mse_values) > 0:
-                            mse_jax = jnp.array(mse_values)
-                            _, mean_mse, _ = compute_min_mean_end_mse_over_context(mse_jax)
-                            all_mean_mse[step_idx, task_idx] = float(mean_mse)
-                        else:
-                            all_mean_mse[step_idx, task_idx] = float('inf')
-                    else:
-                        all_mean_mse[step_idx, task_idx] = float('inf')
-            
-            # Find best step and compute its AUC
-            all_mean_mse_jax = jnp.array(all_mean_mse)
-            
-            def compute_step_auc(step_idx):
-                mean_log_mse = jnp.log(all_mean_mse_jax[step_idx])
-                return compute_auc_trapz(shift_distances, mean_log_mse)
-            
-            step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
-            min_auc = float(jnp.min(step_aucs))
             
             # Update best if this is better
             if min_auc < best_auc:
@@ -2102,11 +2157,104 @@ def find_best_param_combination_by_auc(run_group: list, optimize_params: list, b
                 best_run = run
                 best_param_values = param_values
                 
+        except (KeyError, ValueError, TypeError) as e:
+            print(f"Warning: Failed to process run {run.get('name', 'unknown')}: {e}")
+            continue
         except Exception as e:
-            # Skip runs that fail to process
+            print(f"Warning: Unexpected error processing run {run.get('name', 'unknown')}: {e}")
             continue
     
     return best_run, best_auc, best_param_values
+
+
+def format_parameter_legend(other_params_tuples: list, best_param_values: dict, max_length: int = 50) -> str:
+    """Create a formatted legend name with smart truncation.
+    
+    Args:
+        other_params_tuples: List of (param_name, param_value) tuples for non-optimized params
+        best_param_values: Dict of {param_name: param_value} for optimized params
+        max_length: Maximum allowed length for the legend string
+        
+    Returns:
+        str: Formatted legend name with smart truncation
+    """
+    def shorten_param_name(param_name: str) -> str:
+        """Convert parameter name to shorter form."""
+        parts = param_name.split('.')
+        if len(parts) >= 2:
+            # Use last two parts for clarity (e.g., "task.n_tasks" -> "task.n_tasks", "train.optimizer.lr" -> "optimizer.lr")
+            return '.'.join(parts[-2:]) if len(parts) > 2 else param_name
+        return param_name
+    
+    # Format other parameters
+    other_parts = []
+    for param, value in other_params_tuples:
+        short_name = shorten_param_name(param)
+        other_parts.append(f"{short_name}={value}")
+    
+    # Format optimized parameters
+    opt_parts = []
+    for param, value in best_param_values.items():
+        short_name = shorten_param_name(param)
+        opt_parts.append(f"{short_name}={value}")
+    
+    # Combine parts
+    other_str = ", ".join(other_parts)
+    opt_str = ", ".join(opt_parts)
+    
+    if other_str:
+        full_legend = f"{other_str} | BEST({opt_str})"
+    else:
+        full_legend = f"BEST({opt_str})"
+    
+    # Apply smart truncation if needed
+    if len(full_legend) <= max_length:
+        return full_legend
+    
+    # Try truncation strategies
+    # Strategy 1: Truncate parameter values
+    if len(full_legend) > max_length:
+        def truncate_value(value_str, max_val_len=8):
+            if len(str(value_str)) > max_val_len:
+                return f"{str(value_str)[:max_val_len-3]}..."
+            return str(value_str)
+        
+        # Re-format with truncated values
+        other_parts_short = []
+        for param, value in other_params_tuples:
+            short_name = shorten_param_name(param)
+            other_parts_short.append(f"{short_name}={truncate_value(value)}")
+        
+        opt_parts_short = []
+        for param, value in best_param_values.items():
+            short_name = shorten_param_name(param)
+            opt_parts_short.append(f"{short_name}={truncate_value(value)}")
+        
+        other_str_short = ", ".join(other_parts_short)
+        opt_str_short = ", ".join(opt_parts_short)
+        
+        if other_str_short:
+            truncated_legend = f"{other_str_short} | BEST({opt_str_short})"
+        else:
+            truncated_legend = f"BEST({opt_str_short})"
+        
+        if len(truncated_legend) <= max_length:
+            return truncated_legend
+    
+    # Strategy 2: Use only parameter names without values and add ellipsis
+    param_names = [shorten_param_name(p) for p, v in other_params_tuples]
+    opt_param_names = [shorten_param_name(p) for p in best_param_values.keys()]
+    
+    if param_names:
+        final_legend = f"{','.join(param_names)} | BEST({','.join(opt_param_names)})..."
+    else:
+        final_legend = f"BEST({','.join(opt_param_names)})..."
+    
+    # Final truncation if still too long
+    if len(final_legend) > max_length:
+        final_legend = final_legend[:max_length-3] + "..."
+    
+    return final_legend
 
 
 def create_run_display_names(multirun_path: Path, run_subdirs: list) -> dict:
@@ -2529,6 +2677,18 @@ Examples:
         optimize_params = None
         if isinstance(args.shift_analysis, str):
             optimize_params = [param.strip() for param in args.shift_analysis.split(',')]
+            
+            # Validate parameter format (should be dotted paths like 'task.n_tasks')
+            invalid_format_params = []
+            for param in optimize_params:
+                if not param or '.' not in param or len(param.split('.')) < 2:
+                    invalid_format_params.append(param)
+            
+            if invalid_format_params:
+                print(f"Error: Invalid parameter format: {invalid_format_params}")
+                print("Parameters should be dotted paths like 'task.n_tasks' or 'train.clip_max_norm'")
+                return 1
+            
             print(f"Parameter optimization mode: {optimize_params}")
         
         # Perform task shift analysis
