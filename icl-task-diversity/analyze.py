@@ -14,13 +14,19 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import jit
-from functools import partial
+from functools import partial, lru_cache
 import yaml
 from scipy.optimize import curve_fit
 import itertools
 from matplotlib.colors import LogNorm
 from safetensors.numpy import load_file
 import re
+import concurrent.futures
+import multiprocessing
+import time
+
+# Global configuration for parallel processing
+MAX_NUM_CPUS = min(8, multiprocessing.cpu_count())
 
 
 def get_most_recent_run() -> str:
@@ -74,11 +80,92 @@ def load_log(run_id: str) -> dict:
         return json.load(f)
 
 
+@lru_cache(maxsize=1024)
+def parse_tensor_key(tensor_key: str) -> tuple:
+    """Parse tensor key with caching for performance.
+    
+    Args:
+        tensor_key: String like "Fixed_task_2_0_Transformer_vs_Ridge_MSE"
+    
+    Returns:
+        tuple: (task_name, baseline_name, metric_key, log_key) or None if invalid
+    """
+    # Find metric type (MSE or RelErr)
+    if tensor_key.endswith('_MSE'):
+        metric_type = 'MSE'
+        base_key = tensor_key[:-4]  # Remove '_MSE'
+    elif tensor_key.endswith('_RelErr'):
+        metric_type = 'RelErr'  
+        base_key = tensor_key[:-7]  # Remove '_RelErr'
+    else:
+        return None
+    
+    # Split by '_Transformer_vs_' to separate task from baseline
+    if '_Transformer_vs_' not in base_key:
+        return None
+    
+    task_part, baseline_part = base_key.split('_Transformer_vs_', 1)
+    
+    # Optimize string replacements - avoid regex
+    task_name = task_part.replace('_', ' ')
+    # Handle decimal numbers in task names (e.g., "2_0" -> "2.0")
+    if ' ' in task_name:
+        parts = task_name.split(' ')
+        for i in range(len(parts) - 1):
+            if parts[i].isdigit() and parts[i + 1].isdigit():
+                parts[i] = parts[i] + '.' + parts[i + 1]
+                parts.pop(i + 1)
+                break
+        task_name = ' '.join(parts)
+    
+    baseline_name = baseline_part.replace('_', ' ')
+    # Handle decimal numbers in baseline names
+    if ' ' in baseline_name:
+        parts = baseline_name.split(' ')
+        for i in range(len(parts) - 1):
+            if parts[i].isdigit() and parts[i + 1].isdigit():
+                parts[i] = parts[i] + '.' + parts[i + 1]
+                parts.pop(i + 1)
+                break
+        baseline_name = ' '.join(parts)
+    
+    # Handle special cases
+    if task_name.startswith('Test tasks'):
+        task_name = 'Test tasks'
+    
+    # Build log key and metric key
+    log_key = f"eval/{task_name}"
+    if metric_type == 'RelErr':
+        metric_key = f"Transformer | {baseline_name} (RelErr)"
+    else:
+        metric_key = f"Transformer | {baseline_name}"
+    
+    return task_name, baseline_name, metric_key, log_key
+
+
+def load_safetensor_file(file_info: tuple) -> tuple:
+    """Load a single safetensor file and return parsed data.
+    
+    Args:
+        file_info: (file_path, file_index)
+    
+    Returns:
+        tuple: (file_index, tensors_dict, success_flag, error_msg)
+    """
+    file_path, file_index = file_info
+    
+    try:
+        tensors = load_file(file_path)
+        return file_index, tensors, True, None
+    except Exception as e:
+        return file_index, None, False, str(e)
+
+
 def load_log_with_safetensors(run_path: Path) -> dict:
-    """Load log with optional safetensor speedup for evaluation data.
+    """Load log with optimized parallel safetensor speedup for evaluation data.
     
     This function is backward compatible:
-    - If safetensor files exist, loads eval data from them (much faster)
+    - If safetensor files exist, loads eval data from them using parallel processing (much faster)
     - Falls back to JSON for everything else or if safetensors don't exist
     
     Args:
@@ -94,6 +181,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
         raise FileNotFoundError(f"Log file not found: {log_path}")
     
     # Always load the base log from JSON
+    start_time = time.time()
     with open(log_path, "r") as f:
         log = json.load(f)
     
@@ -102,96 +190,117 @@ def load_log_with_safetensors(run_path: Path) -> dict:
         safetensor_files = sorted(eval_results_dir.glob("eval_step_*.safetensors"))
         
         if safetensor_files:
-            print(f"Found {len(safetensor_files)} safetensor eval files, loading for faster analysis...")
+            print(f"Found {len(safetensor_files)} safetensor eval files, loading with parallel optimization...")
             
             # Get evaluation steps from log
             eval_steps = log.get("eval/step", [])
             
-            # Initialize eval data structure - prepare empty lists for each metric
+            # Pre-allocate eval data structure based on existing log structure
             eval_data = {}
-            for key in log.keys():
-                if key.startswith("eval/") and key != "eval/step":
-                    eval_data[key] = {}
-                    for metric_name in log[key].keys():
-                        eval_data[key][metric_name] = []
+            all_tensor_keys = set()
             
-            # Load data from safetensor files in order
-            for i, safetensor_file in enumerate(safetensor_files):
-                if i >= len(eval_steps):
-                    break
+            # First pass: collect all possible tensor keys from first file to pre-allocate
+            try:
+                first_tensors = load_file(safetensor_files[0])
+                all_tensor_keys = set(first_tensors.keys())
+            except Exception:
+                # Fall back to JSON if we can't even load first file
+                print("Warning: Could not load first safetensor file, falling back to JSON")
+                return log
+            
+            # Pre-build structure for all expected metrics
+            num_files = min(len(safetensor_files), len(eval_steps))
+            for tensor_key in all_tensor_keys:
+                parsed = parse_tensor_key(tensor_key)
+                if parsed:
+                    task_name, baseline_name, metric_key, log_key = parsed
                     
-                try:
-                    tensors = load_file(safetensor_file)
+                    if log_key not in eval_data:
+                        eval_data[log_key] = {}
+                    if metric_key not in eval_data[log_key]:
+                        # Pre-allocate list of correct size to avoid dynamic resizing
+                        eval_data[log_key][metric_key] = [None] * num_files
+            
+            # Parallel loading of safetensor files
+            file_infos = [(safetensor_files[i], i) for i in range(num_files)]
+            
+            # Use parallel processing with ThreadPoolExecutor
+            num_workers = min(MAX_NUM_CPUS, len(file_infos))
+            
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    load_start = time.time()
                     
-                    # Convert safetensor data back to log format
-                    for tensor_key, tensor_data in tensors.items():
-                        # Parse tensor key more carefully
-                        # Expected format: {task_name}_Transformer_vs_{baseline}_MSE/RelErr
+                    # Submit all file loading tasks
+                    future_to_index = {
+                        executor.submit(load_safetensor_file, file_info): file_info[1] 
+                        for file_info in file_infos
+                    }
+                    
+                    # Process results as they complete
+                    failed_files = 0
+                    for future in concurrent.futures.as_completed(future_to_index):
+                        file_index, tensors, success, error_msg = future.result()
                         
-                        # Find metric type (MSE or RelErr)
-                        if tensor_key.endswith('_MSE'):
-                            metric_type = 'MSE'
-                            base_key = tensor_key[:-4]  # Remove '_MSE'
-                        elif tensor_key.endswith('_RelErr'):
-                            metric_type = 'RelErr'
-                            base_key = tensor_key[:-7]  # Remove '_RelErr'
-                        else:
+                        if not success:
+                            print(f"Warning: Could not load safetensor file index {file_index}: {error_msg}")
+                            failed_files += 1
                             continue
                         
-                        # Split by '_Transformer_vs_' to separate task from baseline
-                        if '_Transformer_vs_' not in base_key:
-                            continue
-                            
-                        task_part, baseline_part = base_key.split('_Transformer_vs_', 1)
-                        
-                        # Reconstruct names by replacing underscores with spaces
-                        task_name = task_part.replace('_', ' ')
-                        task_name = re.sub(r"(\d+)\s+(\d+)", r"\1.\2", task_name)
-
-                        baseline_name = baseline_part.replace('_', ' ')
-                        baseline_name = re.sub(r"(\d+)\s+(\d+)", r"\1.\2", baseline_name)
-                        
-                        # Handle special cases
-                        if task_name.startswith('Test tasks'):
-                            task_name = 'Test tasks'
-                        elif task_name.startswith('Fixed task'):
-                            # Keep the number part for Fixed task
-                            pass
-                            
-                        # Build log key and metric key
-                        log_key = f"eval/{task_name}"
-                        if metric_type == 'RelErr':
-                            metric_key = f"Transformer | {baseline_name} (RelErr)"
-                        else:
-                            metric_key = f"Transformer | {baseline_name}"
-                        
-                        # Initialize structure if needed
-                        if log_key not in eval_data:
-                            eval_data[log_key] = {}
-                        if metric_key not in eval_data[log_key]:
-                            eval_data[log_key][metric_key] = []
-                            
-                        # Store tensor data (will be appended in order for each step)
-                        # For now, just mark that we have data for this step
-                        while len(eval_data[log_key][metric_key]) <= i:
-                            eval_data[log_key][metric_key].append(None)
-                        eval_data[log_key][metric_key][i] = tensor_data.tolist()
-                        
-                except Exception as e:
-                    print(f"Warning: Could not load safetensor file {safetensor_file}: {e}")
-                    # Fall back to JSON for this file
+                        # Process each tensor in the loaded file
+                        for tensor_key, tensor_data in tensors.items():
+                            parsed = parse_tensor_key(tensor_key)
+                            if parsed:
+                                task_name, baseline_name, metric_key, log_key = parsed
+                                
+                                # Direct assignment instead of list operations
+                                if (log_key in eval_data and 
+                                    metric_key in eval_data[log_key] and 
+                                    file_index < len(eval_data[log_key][metric_key])):
+                                    eval_data[log_key][metric_key][file_index] = tensor_data.tolist()
                     
-            # Update log with loaded eval data, filtering out None values
+                    load_time = time.time() - load_start
+                    print(f"Parallel loading completed in {load_time:.2f}s using {num_workers} workers")
+                    if failed_files > 0:
+                        print(f"Warning: {failed_files} files failed to load")
+                
+            except Exception as e:
+                print(f"Warning: Parallel loading failed ({e}), falling back to sequential loading")
+                
+                # Fall back to sequential loading
+                for i, safetensor_file in enumerate(safetensor_files):
+                    if i >= len(eval_steps):
+                        break
+                        
+                    try:
+                        tensors = load_file(safetensor_file)
+                        
+                        for tensor_key, tensor_data in tensors.items():
+                            parsed = parse_tensor_key(tensor_key)
+                            if parsed:
+                                task_name, baseline_name, metric_key, log_key = parsed
+                                
+                                if (log_key in eval_data and 
+                                    metric_key in eval_data[log_key] and 
+                                    i < len(eval_data[log_key][metric_key])):
+                                    eval_data[log_key][metric_key][i] = tensor_data.tolist()
+                                    
+                    except Exception as e:
+                        print(f"Warning: Could not load safetensor file {safetensor_file}: {e}")
+                        continue
+            
+            # Update log with loaded eval data - direct assignment, no filtering needed
             for log_key, metrics in eval_data.items():
                 if log_key not in log:
                     log[log_key] = {}
                 for metric_key, values in metrics.items():
-                    # Filter out None values and ensure we have data
+                    # Filter out None values (files that failed to load)
                     filtered_values = [v for v in values if v is not None]
                     if filtered_values:
                         log[log_key][metric_key] = filtered_values
                     
-            print("Successfully loaded evaluation data from safetensors")
+            total_time = time.time() - start_time
+            print(f"Successfully loaded evaluation data from safetensors in {total_time:.2f}s total")
             return log
     
     # Fall back to original JSON loading if no safetensors or loading failed
@@ -355,6 +464,33 @@ def compute_min_mean_end_mse_over_context(mse_values: jnp.ndarray) -> tuple[floa
     min_mse = jnp.min(mse_values[1:]) if len(mse_values) > 1 else mse_values[0]
     mean_mse = jnp.mean(mse_values)
     end_mse = mse_values[-1]  # MSE at last context position
+    return min_mse, mean_mse, end_mse
+
+
+def compute_min_mean_end_mse_for_prefix(mse_values: jnp.ndarray, prefix_length: int) -> tuple[float, float, float]:
+    """Compute min, mean, and end MSE over a specific sequence length prefix (NOT JIT compiled to handle dynamic prefix).
+    
+    Args:
+        mse_values: MSE values over context positions
+        prefix_length: Number of positions to include from the beginning (must be <= len(mse_values))
+        
+    Returns:
+        tuple: (min_mse_excluding_first, mean_mse_prefix, end_mse_prefix)
+    """
+    # Ensure prefix_length doesn't exceed available data
+    actual_prefix = min(prefix_length, len(mse_values))
+    
+    # Take only the first prefix_length positions using numpy-style slicing
+    prefix_values = mse_values[:actual_prefix]
+    
+    # Skip first position (index 0) for min MSE as per original code
+    if len(prefix_values) > 1:
+        min_mse = jnp.min(prefix_values[1:])
+    else:
+        min_mse = prefix_values[0]
+    
+    mean_mse = jnp.mean(prefix_values)
+    end_mse = prefix_values[actual_prefix - 1]  # MSE at last position in prefix
     return min_mse, mean_mse, end_mse
 
 
@@ -581,6 +717,130 @@ def extract_min_mse_params_for_baseline(log: dict, baseline_type: str, return_se
                     # Convert to JAX array for JIT computation
                     mse_jax = jnp.array(mse_values)
                     min_mse, mean_mse, end_mse = compute_min_mean_end_mse_over_context(mse_jax)
+                    all_min_mse[step_idx, task_idx] = float(min_mse)
+                    all_mean_mse[step_idx, task_idx] = float(mean_mse)
+                    all_end_mse[step_idx, task_idx] = float(end_mse)
+                else:
+                    all_min_mse[step_idx, task_idx] = float('inf')
+                    all_mean_mse[step_idx, task_idx] = float('inf')
+                    all_end_mse[step_idx, task_idx] = float('inf')
+            else:
+                all_min_mse[step_idx, task_idx] = float('inf')
+                all_mean_mse[step_idx, task_idx] = float('inf')
+                all_end_mse[step_idx, task_idx] = float('inf')
+    
+    # Convert to JAX arrays for optimized computation
+    all_min_mse_jax = jnp.array(all_min_mse)
+    all_mean_mse_jax = jnp.array(all_mean_mse)
+    all_end_mse_jax = jnp.array(all_end_mse)
+    
+    # Find best steps with minimal AUC (JIT compiled)
+    best_min_step, best_mean_step, best_end_step = find_best_step_by_auc(
+        all_min_mse_jax, all_mean_mse_jax, all_end_mse_jax, shift_distances, num_steps, num_tasks
+    )
+    
+    # Extract results from the best steps
+    min_mse_results = {}
+    mean_mse_results = {}
+    end_mse_results = {}
+    selected_steps = {}
+    
+    for task_idx, task_name in enumerate(task_names):
+        min_mse_results[task_name] = float(all_min_mse[int(best_min_step), task_idx])
+        mean_mse_results[task_name] = float(all_mean_mse[int(best_mean_step), task_idx])
+        end_mse_results[task_name] = float(all_end_mse[int(best_end_step), task_idx])
+        if return_selected_steps:
+            # Convert JAX array indices to Python ints and then to actual step numbers
+            min_step_num = eval_steps[int(best_min_step)]
+            mean_step_num = eval_steps[int(best_mean_step)]
+            end_step_num = eval_steps[int(best_end_step)]
+            selected_steps[task_name] = (min_step_num, mean_step_num, end_step_num)
+    
+    if return_selected_steps:
+        return min_mse_results, mean_mse_results, end_mse_results, selected_steps
+    else:
+        return min_mse_results, mean_mse_results, end_mse_results
+
+
+def extract_min_mse_params_for_baseline_with_prefix(log: dict, baseline_type: str, prefix_length: int, return_selected_steps: bool = False) -> tuple[dict, dict, dict] | tuple[dict, dict, dict, dict]:
+    """Extract minimum MSE over sequence length prefix, mean MSE over prefix, and end MSE for iteration with minimal AUC of log MSE over shift distance for all tasks for a specific baseline and prefix.
+    
+    Args:
+        log: The log dictionary
+        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
+        prefix_length: Number of sequence positions to include from the beginning
+        return_selected_steps: If True, also return which steps were selected
+    
+    Returns:
+        tuple: (min_mse_dict, mean_mse_dict, end_mse_dict) or (min_mse_dict, mean_mse_dict, end_mse_dict, selected_steps_dict) where:
+            min_mse_dict: {task_name: min_mse_over_prefix}
+            mean_mse_dict: {task_name: mean_mse_over_prefix}
+            end_mse_dict: {task_name: end_mse_at_prefix}
+            selected_steps_dict: {task_name: (min_mse_step, mean_mse_step, end_mse_step)} - only if return_selected_steps=True
+    """
+    eval_steps = log.get("eval/step", [])
+    if not eval_steps:
+        if return_selected_steps:
+            return {}, {}, {}, {}
+        else:
+            return {}, {}, {}
+    
+    # Extract evaluation metrics for all steps
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/") and key != "eval/step":
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+    
+    # Find tasks that match our criteria and baseline
+    task_data = {}  # {task_name: (shift_distance, metric_values)}
+    
+    for task_name, metrics in eval_metrics.items():
+        # Include both Test tasks and Fixed task
+        if task_name == "Test tasks" or task_name.startswith("Fixed task"):
+            # Look for the specific baseline type
+            selected_metric = None
+            for metric_name, values in metrics.items():
+                if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                    selected_metric = (metric_name, values)
+                    break
+            
+            if selected_metric:
+                metric_name, values = selected_metric
+                shift_distance = extract_task_shift_distance(task_name)
+                task_data[task_name] = (shift_distance, values)
+    
+    if not task_data:
+        if return_selected_steps:
+            return {}, {}, {}, {}
+        else:
+            return {}, {}, {}
+    
+    # Sort tasks by shift distance for consistent ordering
+    sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
+    task_names = [task_name for task_name, _ in sorted_tasks]
+    shift_distances = jnp.array([shift_dist for _, (shift_dist, _) in sorted_tasks])
+    
+    # Collect MSE data for all steps and tasks using the prefix length
+    num_steps = len(eval_steps)
+    num_tasks = len(sorted_tasks)
+    
+    all_min_mse = np.zeros((num_steps, num_tasks))
+    all_mean_mse = np.zeros((num_steps, num_tasks))
+    all_end_mse = np.zeros((num_steps, num_tasks))
+    
+    for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
+        for step_idx in range(num_steps):
+            if step_idx < len(values):
+                mse_values = normalize_error_values(values[step_idx])
+                if mse_values is not None and len(mse_values) > 0:
+                    # Convert to JAX array for JIT computation
+                    mse_jax = jnp.array(mse_values)
+                    # Use the prefix-specific function instead of the full context one
+                    min_mse, mean_mse, end_mse = compute_min_mean_end_mse_for_prefix(mse_jax, prefix_length)
                     all_min_mse[step_idx, task_idx] = float(min_mse)
                     all_mean_mse[step_idx, task_idx] = float(mean_mse)
                     all_end_mse[step_idx, task_idx] = float(end_mse)
@@ -1755,6 +2015,115 @@ def process_loaded_data_for_baseline(loaded_data: dict, baseline_type: str) -> t
     return min_mse_data, mean_mse_data, end_mse_data, selected_steps_data
 
 
+def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_type: str) -> dict[int, tuple[dict, dict, dict, dict]]:
+    """Process pre-loaded data for a specific baseline at multiple sequence length prefixes without any I/O.
+    
+    Args:
+        loaded_data: Dictionary returned by load_all_logs()
+        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
+    
+    Returns:
+        dict: {prefix_length: (min_mse_dict, mean_mse_dict, end_mse_dict, selected_steps_dict)} where:
+            prefix_length: Sequence length prefix (16, 32, 48, etc.)
+            min_mse_dict: {run_label: [(task_center, min_mse, task_name), ...]}
+            mean_mse_dict: {run_label: [(task_center, mean_mse, task_name), ...]}
+            end_mse_dict: {run_label: [(task_center, end_mse, task_name), ...]}
+            selected_steps_dict: {run_label: {task_name: (min_step, mean_step, end_step)}}
+    """
+    # First, determine the sequence length of the data by examining one run
+    max_seq_length = None
+    for run_label in loaded_data['run_labels']:
+        log = loaded_data['logs'][run_label]
+        # Look for MSE data to determine sequence length
+        for key, value in log.items():
+            if key.startswith("eval/") and key != "eval/step":
+                for metric_name, metric_values in value.items():
+                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and metric_values:
+                        # Get the first non-empty MSE values to check length
+                        first_values = normalize_error_values(metric_values[0])
+                        if first_values is not None and len(first_values) > 0:
+                            max_seq_length = len(first_values)
+                            break
+                if max_seq_length is not None:
+                    break
+            if max_seq_length is not None:
+                break
+        if max_seq_length is not None:
+            break
+    
+    if max_seq_length is None:
+        print(f"Warning: Could not determine sequence length for {baseline_type} baseline")
+        return {}
+    
+    # Generate prefix lengths: multiples of 16 up to max_seq_length
+    prefix_lengths = []
+    for prefix in range(16, max_seq_length + 1, 16):
+        prefix_lengths.append(prefix)
+    
+    # Also include the full length if it's not already included
+    if max_seq_length not in prefix_lengths:
+        prefix_lengths.append(max_seq_length)
+    
+    print(f"Processing {baseline_type} baseline for sequence prefixes: {prefix_lengths}")
+    
+    # Process data for each prefix length
+    results_by_prefix = {}
+    
+    for prefix_length in prefix_lengths:
+        min_mse_data = {}
+        mean_mse_data = {}
+        end_mse_data = {}
+        selected_steps_data = {}
+        
+        for run_label in loaded_data['run_labels']:
+            log = loaded_data['logs'][run_label]
+            config, task_centers = loaded_data['metadata'][run_label]
+            
+            # Extract MSE data for this specific prefix length
+            try:
+                min_mse_params, mean_mse_params, end_mse_params, selected_steps = extract_min_mse_params_for_baseline_with_prefix(
+                    log, baseline_type, prefix_length, return_selected_steps=True
+                )
+                
+                min_mse_run_data = []
+                mean_mse_run_data = []
+                end_mse_run_data = []
+                
+                # Add Test tasks (task center = 0)
+                if "Test tasks" in min_mse_params:
+                    min_mse = min_mse_params["Test tasks"]
+                    mean_mse = mean_mse_params.get("Test tasks", 0)
+                    end_mse = end_mse_params.get("Test tasks", 0)
+                    min_mse_run_data.append((0.0, min_mse, "Test tasks"))
+                    mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
+                    end_mse_run_data.append((0.0, end_mse, "Test tasks"))
+                
+                # Add Fixed tasks
+                for task_center in task_centers:
+                    task_name = f"Fixed task {task_center}"
+                    if task_name in min_mse_params:
+                        min_mse = min_mse_params[task_name]
+                        mean_mse = mean_mse_params.get(task_name, 0)
+                        end_mse = end_mse_params.get(task_name, 0)
+                        min_mse_run_data.append((task_center, min_mse, task_name))
+                        mean_mse_run_data.append((task_center, mean_mse, task_name))
+                        end_mse_run_data.append((task_center, end_mse, task_name))
+                
+                if min_mse_run_data:
+                    min_mse_data[run_label] = min_mse_run_data
+                    mean_mse_data[run_label] = mean_mse_run_data
+                    end_mse_data[run_label] = end_mse_run_data
+                    selected_steps_data[run_label] = selected_steps
+                    
+            except Exception as e:
+                print(f"Warning: Failed to process {baseline_type} baseline for {run_label} at prefix {prefix_length}: {e}")
+                continue
+        
+        results_by_prefix[prefix_length] = (min_mse_data, mean_mse_data, end_mse_data, selected_steps_data)
+    
+    return results_by_prefix
+
+
 def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None, optimize_params: list = None):
     """Plot minimum MSE vs task shift and mean MSE over context length for last iteration for multiple runs.
     
@@ -1786,12 +2155,12 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         print("No valid log data found")
         return
     
-    # PHASE 2: Process data for each baseline (no I/O, uses cached logs)
-    print("Processing Ridge baseline...")
-    ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data = process_loaded_data_for_baseline(ridge_loaded_data, 'Ridge')
+    # PHASE 2: Process data for each baseline at multiple sequence length prefixes (no I/O, uses cached logs)
+    print("Processing Ridge baseline with multiple prefixes...")
+    ridge_results_by_prefix = process_loaded_data_for_baseline_with_prefixes(ridge_loaded_data, 'Ridge')
     
-    print("Processing True baseline...")
-    true_min_data, true_mean_data, true_end_data, true_steps_data = process_loaded_data_for_baseline(true_loaded_data, 'True')
+    print("Processing True baseline with multiple prefixes...")
+    true_results_by_prefix = process_loaded_data_for_baseline_with_prefixes(true_loaded_data, 'True')
     
     # PHASE 3: Free memory by clearing loaded data
     try:
@@ -1800,16 +2169,37 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     except:
         pass  # Ignore deletion errors
     
-    # Determine which plots to create
-    create_ridge_plot = bool(ridge_min_data)
-    create_true_plot = bool(true_min_data)
+    # Determine which plots to create for each prefix
+    create_ridge_plots = bool(ridge_results_by_prefix)
+    create_true_plots = bool(true_results_by_prefix)
     
-    if not create_ridge_plot and not create_true_plot:
+    if not create_ridge_plots and not create_true_plots:
         print("No valid data found for minimum MSE analysis")
         return
     
-    # Helper function to create a plot for a specific baseline
+    # Get all prefix lengths
+    all_prefixes = set()
+    if ridge_results_by_prefix:
+        all_prefixes.update(ridge_results_by_prefix.keys())
+    if true_results_by_prefix:
+        all_prefixes.update(true_results_by_prefix.keys())
+    
+    if not all_prefixes:
+        print("No sequence length prefixes found")
+        return
+    
+    sorted_prefixes = sorted(all_prefixes)
+    print(f"Creating plots for sequence length prefixes: {sorted_prefixes}")
+    
+    # Helper function to create a plot for a specific baseline and prefix
     def create_mse_plot(min_mse_data, mean_mse_data, end_mse_data, selected_steps_data, baseline_type: str, fig_suffix: str):
+        # Extract prefix length from fig_suffix (e.g., 'ridge_prefix_32' -> 32)
+        prefix_length = None
+        if 'prefix_' in fig_suffix:
+            try:
+                prefix_length = int(fig_suffix.split('prefix_')[1])
+            except (IndexError, ValueError):
+                pass
         # Create the plot with three subplots in a separate figure
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 6))
         
@@ -1852,10 +2242,11 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             ax1.plot(task_centers, min_mses, 'o-', color=color, linewidth=2, 
                     markersize=6, label=label_with_step)
         
-        # Configure minimum MSE plot
+        # Configure minimum MSE plot with prefix information
         ax1.set_xlabel("Task Center (Task Shift)")
         ax1.set_ylabel(f"Best MSE vs {baseline_type} Baseline (Optimal Iteration)")
-        ax1.set_title(f"Best MSE vs {baseline_type} Baseline vs Task Shift")
+        title_suffix = f" (Seq Len: {prefix_length})" if prefix_length else ""
+        ax1.set_title(f"Best MSE vs {baseline_type} Baseline vs Task Shift{title_suffix}")
         ax1.grid(True, alpha=0.3)
         ax1.set_yscale('log')
         
@@ -1886,10 +2277,10 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             ax2.plot(task_centers, mean_mses, 'o-', color=color, linewidth=2, 
                     markersize=6, label=label_with_step)
         
-        # Configure mean MSE over context length plot
+        # Configure mean MSE over context length plot with prefix information
         ax2.set_xlabel("Task Center (Task Shift)")
         ax2.set_ylabel(f"Mean MSE vs {baseline_type} Baseline (Optimal Iteration)")
-        ax2.set_title(f"Mean MSE vs {baseline_type} Baseline vs Task Shift")
+        ax2.set_title(f"Mean MSE vs {baseline_type} Baseline vs Task Shift{title_suffix}")
         ax2.grid(True, alpha=0.3)
         ax2.set_yscale('log')
         
@@ -1920,10 +2311,10 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             ax3.plot(task_centers, end_mses, 'o-', color=color, linewidth=2, 
                     markersize=6, label=label_with_step)
         
-        # Configure end MSE plot
+        # Configure end MSE plot with prefix information
         ax3.set_xlabel("Task Center (Task Shift)")
         ax3.set_ylabel(f"End MSE vs {baseline_type} Baseline (Optimal Iteration)")
-        ax3.set_title(f"End MSE vs {baseline_type} Baseline vs Task Shift")
+        ax3.set_title(f"End MSE vs {baseline_type} Baseline vs Task Shift{title_suffix}")
         ax3.grid(True, alpha=0.3)
         ax3.set_yscale('log')
         
@@ -1971,12 +2362,23 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 end_mse = end_dict.get(task_name, "N/A")
                 print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, mean_mse={mean_mse:.6f}, end_mse={end_mse:.6f}")
     
-    # Create plots for available baselines
-    if create_ridge_plot:
-        create_mse_plot(ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data, 'Ridge', 'ridge')
-    
-    if create_true_plot:
-        create_mse_plot(true_min_data, true_mean_data, true_end_data, true_steps_data, 'True', 'true')
+    # Create plots for each prefix and available baselines
+    for prefix_length in sorted_prefixes:
+        print(f"\nCreating plots for sequence prefix length: {prefix_length}")
+        
+        # Create Ridge plots for this prefix
+        if create_ridge_plots and prefix_length in ridge_results_by_prefix:
+            ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data = ridge_results_by_prefix[prefix_length]
+            if ridge_min_data:  # Only create plot if we have data
+                create_mse_plot(ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data, 
+                              'Ridge', f'ridge_prefix_{prefix_length}')
+        
+        # Create True plots for this prefix
+        if create_true_plots and prefix_length in true_results_by_prefix:
+            true_min_data, true_mean_data, true_end_data, true_steps_data = true_results_by_prefix[prefix_length]
+            if true_min_data:  # Only create plot if we have data
+                create_mse_plot(true_min_data, true_mean_data, true_end_data, true_steps_data, 
+                              'True', f'true_prefix_{prefix_length}')
 
 
 def analyze_multirun(multirun_id: str, custom_names: list = None):
@@ -2693,7 +3095,7 @@ Examples:
         
         # Perform task shift analysis
         try:
-            plot_task_shift_analysis(run_paths, run_labels=custom_names, optimize_params=optimize_params)
+            # plot_task_shift_analysis(run_paths, run_labels=custom_names, optimize_params=optimize_params)
             plot_min_mse_analysis(run_paths, run_labels=custom_names, optimize_params=optimize_params)
         except Exception as e:
             print(f"Error in task shift analysis: {e}")
