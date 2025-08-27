@@ -1080,13 +1080,14 @@ def plot_weights_analysis_multirun(run_paths: list, output_dir: Path = None, run
             print(f"  Final KL: {final_kl:.6f}")
 
 
-def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
+def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None, optimize_params: list = None):
     """Plot alpha and C parameters vs task shift for multiple runs.
     
     Args:
         run_paths: List of Path objects pointing to runs or multirun subdirs
         output_dir: Directory to save plots (optional)
         run_labels: Custom labels for runs (optional)
+        optimize_params: List of parameters to optimize over (e.g., ['task.n_tasks', 'train.clip_max_norm'])
     """
     if not run_paths:
         print("No run paths provided for task shift analysis")
@@ -1106,56 +1107,127 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
         
         # Check if this is a multirun directory or single run
         if (run_path / "multirun.yaml").exists():
-            # This is a multirun directory - we want to analyze each subrun separately
+            # This is a multirun directory
             subdirs = find_valid_multirun_subdirs(run_path, return_paths=True)
             
-            # Extract parameter names from multirun.yaml if no custom labels provided
-            if run_labels is None:
-                param_names = create_run_display_names(run_path, [subdir.name for subdir in subdirs])
-                if param_names:
-                    run_labels = [param_names.get(int(subdir.name), subdir.name) for subdir in subdirs]
-            
-            # Process each subrun as a separate run
-            for subdir_idx, subdir in enumerate(subdirs):
-                # Load config and log for this subrun
-                config_path = subdir / "config.json"
-                log_path = subdir / "log.json"
-                
-                if not config_path.exists() or not log_path.exists():
+            if optimize_params:
+                # Parameter optimization mode - group runs and find best parameter combinations
+                swept_params = extract_swept_params(run_path)
+                if not swept_params:
+                    print(f"Warning: No swept parameters found in {run_path}/multirun.yaml")
                     continue
                 
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                log = load_log_with_safetensors(subdir)
+                # Collect all run data
+                all_runs = []
+                for subdir in subdirs:
+                    config_path = subdir / "config.json"
+                    if not config_path.exists():
+                        continue
+                    
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    log = load_log_with_safetensors(subdir)
+                    
+                    all_runs.append({
+                        'config': config,
+                        'log': log,
+                        'path': subdir,
+                        'name': subdir.name
+                    })
                 
-                # Extract task centers from config
-                task_centers = config.get('eval', {}).get('task_centers', [])
+                # Group runs by non-optimized parameters
+                run_groups = group_runs_by_other_params(all_runs, optimize_params, swept_params)
                 
-                # Extract power law parameters for all tasks
-                power_law_params = extract_power_law_params(log)
+                # For each group, find best parameter combination
+                for group_key, run_group in run_groups.items():
+                    best_run, best_auc, best_param_values = find_best_param_combination_by_auc(
+                        run_group, optimize_params, baseline_type='Ridge'
+                    )
+                    
+                    if best_run is None:
+                        continue
+                    
+                    # Create display name for this group
+                    other_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in group_key])
+                    opt_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in best_param_values.items()])
+                    
+                    if other_params_str:
+                        group_label = f"{other_params_str} | BEST({opt_params_str})"
+                    else:
+                        group_label = f"BEST({opt_params_str})"
+                    
+                    # Extract power law parameters for the best run
+                    config = best_run['config']
+                    log = best_run['log']
+                    task_centers = config.get('eval', {}).get('task_centers', [])
+                    power_law_params = extract_power_law_params(log)
+                    
+                    run_data = []
+                    
+                    # Add Test tasks (task center = 0)
+                    if "Test tasks" in power_law_params:
+                        alpha, C, r_squared = power_law_params["Test tasks"]
+                        run_data.append((0.0, alpha, C, r_squared, "Test tasks"))
+                    
+                    # Add Fixed tasks
+                    for task_center in task_centers:
+                        task_name = f"Fixed task {task_center}"
+                        if task_name in power_law_params:
+                            alpha, C, r_squared = power_law_params[task_name]
+                            run_data.append((task_center, alpha, C, r_squared, task_name))
+                    
+                    if run_data:
+                        data[group_label] = run_data
+                        
+            else:
+                # Standard mode - process each subrun separately
+                # Extract parameter names from multirun.yaml if no custom labels provided
+                if run_labels is None:
+                    param_names = create_run_display_names(run_path, [subdir.name for subdir in subdirs])
+                    if param_names:
+                        run_labels = [param_names.get(int(subdir.name), subdir.name) for subdir in subdirs]
                 
-                # Create run data for this subrun
-                if run_labels and subdir_idx < len(run_labels):
-                    # Use custom name for this subrun
-                    subrun_label = run_labels[subdir_idx].strip()
-                else:
-                    subrun_label = f"{run_label}-{subdir.name}"
-                run_data = []
-                
-                # Add Test tasks (task center = 0)
-                if "Test tasks" in power_law_params:
-                    alpha, C, r_squared = power_law_params["Test tasks"]
-                    run_data.append((0.0, alpha, C, r_squared, "Test tasks"))
-                
-                # Add Fixed tasks
-                for task_center in task_centers:
-                    task_name = f"Fixed task {task_center}"
-                    if task_name in power_law_params:
-                        alpha, C, r_squared = power_law_params[task_name]
-                        run_data.append((task_center, alpha, C, r_squared, task_name))
-                
-                if run_data:
-                    data[subrun_label] = run_data
+                # Process each subrun as a separate run
+                for subdir_idx, subdir in enumerate(subdirs):
+                    # Load config and log for this subrun
+                    config_path = subdir / "config.json"
+                    log_path = subdir / "log.json"
+                    
+                    if not config_path.exists() or not log_path.exists():
+                        continue
+                    
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    log = load_log_with_safetensors(subdir)
+                    
+                    # Extract task centers from config
+                    task_centers = config.get('eval', {}).get('task_centers', [])
+                    
+                    # Extract power law parameters for all tasks
+                    power_law_params = extract_power_law_params(log)
+                    
+                    # Create run data for this subrun
+                    if run_labels and subdir_idx < len(run_labels):
+                        # Use custom name for this subrun
+                        subrun_label = run_labels[subdir_idx].strip()
+                    else:
+                        subrun_label = f"{run_label}-{subdir.name}"
+                    run_data = []
+                    
+                    # Add Test tasks (task center = 0)
+                    if "Test tasks" in power_law_params:
+                        alpha, C, r_squared = power_law_params["Test tasks"]
+                        run_data.append((0.0, alpha, C, r_squared, "Test tasks"))
+                    
+                    # Add Fixed tasks
+                    for task_center in task_centers:
+                        task_name = f"Fixed task {task_center}"
+                        if task_name in power_law_params:
+                            alpha, C, r_squared = power_law_params[task_name]
+                            run_data.append((task_center, alpha, C, r_squared, task_name))
+                    
+                    if run_data:
+                        data[subrun_label] = run_data
         
         elif (run_path / "log.json").exists():
             # This is a single run
@@ -1388,6 +1460,131 @@ def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
     return loaded_data
 
 
+def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = None, optimize_params: list = None) -> dict:
+    """Load all log files with parameter optimization for multirun experiments.
+    
+    Args:
+        run_paths: List of Path objects pointing to runs or multirun subdirs
+        run_labels: Custom labels for runs (optional)
+        optimize_params: List of parameters to optimize over
+    
+    Returns:
+        dict: Same format as load_all_logs but with optimized parameter combinations
+    """
+    if not optimize_params:
+        return load_all_logs(run_paths, run_labels)
+    
+    loaded_data = {
+        'logs': {},
+        'metadata': {},
+        'run_labels': []
+    }
+    
+    actual_run_labels = []
+    
+    for i, run_path in enumerate(run_paths):
+        run_path = Path(run_path)
+        
+        # Determine run label
+        if run_labels and i < len(run_labels):
+            run_label = run_labels[i]
+        else:
+            run_label = run_path.name
+        
+        # Check if this is a multirun directory
+        if (run_path / "multirun.yaml").exists():
+            # This is a multirun directory - apply parameter optimization
+            subdirs = find_valid_multirun_subdirs(run_path, return_paths=True)
+            swept_params = extract_swept_params(run_path)
+            
+            if not swept_params:
+                print(f"Warning: No swept parameters found in {run_path}/multirun.yaml")
+                continue
+            
+            # Collect all run data
+            all_runs = []
+            for subdir in subdirs:
+                config_path = subdir / "config.json"
+                if not config_path.exists():
+                    continue
+                
+                try:
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    log = load_log_with_safetensors(subdir)
+                    
+                    all_runs.append({
+                        'config': config,
+                        'log': log,
+                        'path': subdir,
+                        'name': subdir.name
+                    })
+                except Exception as e:
+                    print(f"Warning: Failed to load run {subdir}: {e}")
+                    continue
+            
+            # Group runs by non-optimized parameters
+            run_groups = group_runs_by_other_params(all_runs, optimize_params, swept_params)
+            
+            # For each group, find best parameter combination
+            for group_key, run_group in run_groups.items():
+                best_run, best_auc, best_param_values = find_best_param_combination_by_auc(
+                    run_group, optimize_params, baseline_type='Ridge'
+                )
+                
+                if best_run is None:
+                    continue
+                
+                # Create display name for this group
+                other_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in group_key])
+                opt_params_str = ", ".join([f"{param.split('.')[-1]}={value}" for param, value in best_param_values.items()])
+                
+                if other_params_str:
+                    group_label = f"{other_params_str} | BEST({opt_params_str})"
+                else:
+                    group_label = f"BEST({opt_params_str})"
+                
+                # Store the best run's data
+                config = best_run['config']
+                log = best_run['log']
+                task_centers = config.get('eval', {}).get('task_centers', [])
+                
+                loaded_data['logs'][group_label] = log
+                loaded_data['metadata'][group_label] = (config, task_centers)
+                actual_run_labels.append(group_label)
+        
+        elif (run_path / "log.json").exists():
+            # This is a single run - use standard processing
+            try:
+                config_path = run_path / "config.json"
+                
+                if not config_path.exists():
+                    continue
+                
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                log = load_log_with_safetensors(run_path)
+                
+                # Extract task centers from config
+                task_centers = config.get('eval', {}).get('task_centers', [])
+                
+                # Store loaded data
+                loaded_data['logs'][run_label] = log
+                loaded_data['metadata'][run_label] = (config, task_centers)
+                actual_run_labels.append(run_label)
+                
+            except Exception as e:
+                print(f"Warning: Failed to load data for {run_path}: {e}")
+                continue
+        
+        else:
+            print(f"Warning: {run_path} is neither a valid run nor multirun directory")
+            continue
+    
+    loaded_data['run_labels'] = actual_run_labels
+    return loaded_data
+
+
 def process_loaded_data_for_baseline(loaded_data: dict, baseline_type: str) -> tuple[dict, dict, dict, dict]:
     """Process pre-loaded data for a specific baseline without any I/O.
     
@@ -1454,13 +1651,14 @@ def process_loaded_data_for_baseline(loaded_data: dict, baseline_type: str) -> t
     return min_mse_data, mean_mse_data, end_mse_data, selected_steps_data
 
 
-def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None):
+def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: list = None, optimize_params: list = None):
     """Plot minimum MSE vs task shift and mean MSE over context length for last iteration for multiple runs.
     
     Args:
         run_paths: List of Path objects pointing to runs or multirun subdirs
         output_dir: Directory to save plots (optional)
         run_labels: Custom labels for runs (optional)
+        optimize_params: List of parameters to optimize over (e.g., ['task.n_tasks', 'train.clip_max_norm'])
     """
     if not run_paths:
         print("No run paths provided for minimum MSE analysis")
@@ -1468,7 +1666,12 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     
     # PHASE 1: Load all data once (eliminates duplicate I/O)
     print("Loading all log files...")
-    loaded_data = load_all_logs(run_paths, run_labels)
+    if optimize_params:
+        # Parameter optimization mode - load and optimize parameter combinations
+        loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params)
+    else:
+        # Standard mode
+        loaded_data = load_all_logs(run_paths, run_labels)
     
     if not loaded_data['logs']:
         print("No valid log data found")
@@ -1769,6 +1972,141 @@ def get_param_value_from_config(config: dict, param_path: str):
         return value
     except (KeyError, TypeError):
         return None
+
+
+def group_runs_by_other_params(run_data: list, optimize_params: list, all_swept_params: list) -> dict:
+    """Group runs by non-optimized parameters.
+    
+    Args:
+        run_data: List of run info dicts with 'config', 'log', 'path', etc.
+        optimize_params: List of parameters to optimize (e.g., ['task.n_tasks', 'train.clip_max_norm'])  
+        all_swept_params: List of all swept parameters from multirun.yaml
+        
+    Returns:
+        dict: {other_params_tuple: [list of runs with those other params]}
+    """
+    other_params = [p for p in all_swept_params if p not in optimize_params]
+    
+    groups = {}
+    for run in run_data:
+        # Create tuple of "other" parameter values for grouping
+        other_values = []
+        for param in other_params:
+            value = get_param_value_from_config(run['config'], param)
+            other_values.append((param, value))
+        
+        other_key = tuple(other_values)
+        if other_key not in groups:
+            groups[other_key] = []
+        groups[other_key].append(run)
+    
+    return groups
+
+
+def find_best_param_combination_by_auc(run_group: list, optimize_params: list, baseline_type: str = 'Ridge') -> tuple:
+    """Find the best parameter combination within a group of runs based on AUC.
+    
+    Args:
+        run_group: List of runs that share the same "other" parameters
+        optimize_params: List of parameters to optimize over
+        baseline_type: 'Ridge' or 'True' for MSE baseline type
+        
+    Returns:
+        tuple: (best_run, best_auc, best_param_values) or (None, float('inf'), {}) if no valid runs
+    """
+    best_run = None
+    best_auc = float('inf')
+    best_param_values = {}
+    
+    for run in run_group:
+        try:
+            # Extract parameter values for this run
+            param_values = {}
+            for param in optimize_params:
+                param_values[param] = get_param_value_from_config(run['config'], param)
+            
+            # Get the log data and compute AUC using existing logic
+            log = run['log']
+            
+            # Use existing function to get MSE data for this baseline
+            min_mse_params, mean_mse_params, end_mse_params = extract_min_mse_params_for_baseline(log, baseline_type)
+            
+            if not min_mse_params:  # No valid data
+                continue
+                
+            # Calculate AUC for this run (we'll use mean MSE AUC as the optimization target)
+            # First, we need to reconstruct the task data structure to get shift distances
+            eval_steps = log.get("eval/step", [])
+            if not eval_steps:
+                continue
+                
+            # Extract evaluation metrics
+            eval_metrics = {}
+            for key, value in log.items():
+                if key.startswith("eval/") and key != "eval/step":
+                    task_name = key.split("/")[1]
+                    if task_name not in eval_metrics:
+                        eval_metrics[task_name] = {}
+                    for metric_name, metric_values in value.items():
+                        eval_metrics[task_name][metric_name] = metric_values
+            
+            # Find tasks that match our criteria and baseline
+            task_data = {}
+            for task_name, metrics in eval_metrics.items():
+                if task_name == "Test tasks" or task_name.startswith("Fixed task"):
+                    for metric_name, values in metrics.items():
+                        if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                            shift_distance = extract_task_shift_distance(task_name)
+                            task_data[task_name] = (shift_distance, values)
+                            break
+            
+            if not task_data:
+                continue
+                
+            # Sort tasks by shift distance
+            sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
+            shift_distances = jnp.array([shift_dist for _, (shift_dist, _) in sorted_tasks])
+            
+            # Compute MSE data for all steps (similar to existing logic)
+            num_steps = len(eval_steps)
+            num_tasks = len(sorted_tasks)
+            
+            all_mean_mse = np.zeros((num_steps, num_tasks))
+            
+            for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
+                for step_idx in range(num_steps):
+                    if step_idx < len(values):
+                        mse_values = normalize_error_values(values[step_idx])
+                        if mse_values is not None and len(mse_values) > 0:
+                            mse_jax = jnp.array(mse_values)
+                            _, mean_mse, _ = compute_min_mean_end_mse_over_context(mse_jax)
+                            all_mean_mse[step_idx, task_idx] = float(mean_mse)
+                        else:
+                            all_mean_mse[step_idx, task_idx] = float('inf')
+                    else:
+                        all_mean_mse[step_idx, task_idx] = float('inf')
+            
+            # Find best step and compute its AUC
+            all_mean_mse_jax = jnp.array(all_mean_mse)
+            
+            def compute_step_auc(step_idx):
+                mean_log_mse = jnp.log(all_mean_mse_jax[step_idx])
+                return compute_auc_trapz(shift_distances, mean_log_mse)
+            
+            step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
+            min_auc = float(jnp.min(step_aucs))
+            
+            # Update best if this is better
+            if min_auc < best_auc:
+                best_auc = min_auc
+                best_run = run
+                best_param_values = param_values
+                
+        except Exception as e:
+            # Skip runs that fail to process
+            continue
+    
+    return best_run, best_auc, best_param_values
 
 
 def create_run_display_names(multirun_path: Path, run_subdirs: list) -> dict:
@@ -2093,6 +2431,7 @@ Examples:
   python analyze.py --multirun 2025-08-11_11-45-46   # Analyze specific multirun
   python analyze.py --multirun "GPT-2,Transformer,LSTM" 2025-08-11_11-45-46   # Custom names
   python analyze.py --multirun --shift-analysis 2025-08-11_11-45-46   # Task shift analysis
+  python analyze.py --multirun --shift-analysis "task.n_tasks,train.clip_max_norm" 2025-08-11_11-45-46   # With parameter optimization
   python analyze.py --multirun --hyperparam-analysis 2025-08-11_11-45-46   # Hyperparameter analysis
         """
     )
@@ -2109,8 +2448,9 @@ Examples:
     )
     parser.add_argument(
         '--shift-analysis',
-        action='store_true',
-        help='Perform task shift analysis (alpha and C vs task centers)'
+        nargs='?',
+        const=True,
+        help='Perform task shift analysis (alpha and C vs task centers). Optionally specify comma-separated parameters to optimize (e.g., "task.n_tasks,train.clip_max_norm")'
     )
     parser.add_argument(
         '--hyperparam-analysis',
@@ -2185,11 +2525,16 @@ Examples:
             # Convert to full paths
             run_paths = [Path("outputs") / run_id for run_id in run_ids]
         
+        # Parse optimization parameters if provided
+        optimize_params = None
+        if isinstance(args.shift_analysis, str):
+            optimize_params = [param.strip() for param in args.shift_analysis.split(',')]
+            print(f"Parameter optimization mode: {optimize_params}")
+        
         # Perform task shift analysis
         try:
-            # Not used anymore
-            # plot_task_shift_analysis(run_paths, run_labels=custom_names)
-            plot_min_mse_analysis(run_paths, run_labels=custom_names)
+            plot_task_shift_analysis(run_paths, run_labels=custom_names, optimize_params=optimize_params)
+            plot_min_mse_analysis(run_paths, run_labels=custom_names, optimize_params=optimize_params)
         except Exception as e:
             print(f"Error in task shift analysis: {e}")
             raise e
