@@ -39,7 +39,7 @@ training:
   lr: 1.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 50_000
-  total_steps: 200_000
+  total_steps: 500_000
   weight_decay: 0.01
   clip_max_norm: null
   T_ramp_ratio: 0.
