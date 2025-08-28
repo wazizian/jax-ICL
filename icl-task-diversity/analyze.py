@@ -505,6 +505,7 @@ def compute_auc_trapz(x_values: jnp.ndarray, y_values: jnp.ndarray) -> float:
     Returns:
         float: Area under the curve
     """
+    return y_values[-1]
     return jnp.trapezoid(y_values, x=x_values)
 
 
@@ -629,7 +630,6 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
         # Find best step and return the minimal mean AUC
         def compute_step_auc(step_idx):
             mean_log_mse = jnp.log(all_mean_mse_jax[step_idx])
-            return mean_log_mse[-1]
             return compute_auc_trapz(shift_distances, mean_log_mse)
         
         step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
