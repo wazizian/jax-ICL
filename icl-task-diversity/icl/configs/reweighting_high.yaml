@@ -36,13 +36,13 @@ model:
 
 training:
   optimizer: adamw
-  lr: 2.0e-3
+  lr: 1.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 50_000
   total_steps: 200_000
   weight_decay: 0.01
   clip_max_norm: 20.0
-  T_ramp_ratio: 0.4
+  T_ramp_ratio: 0.
 
 eval:
   n_samples: 2048
@@ -87,9 +87,7 @@ hydra:
   sweeper:
     params:
       task.use_weights: true, false
-      task.distrib_param: 3.0, 5.0, 10.0, inf
-      training.T_ramp_ratio: 0.4, 0.0
-      training.clip_max_norm: 10.0, 1.0
+      task.distrib_param: 5.0, 10.0
       # training.weight_decay: 0.01, 0.1, 0.5
       # training.lr: 1e-3
       # add_seed: 1
