@@ -1513,7 +1513,7 @@ def plot_task_shift_analysis(run_paths: list, output_dir: Path = None, run_label
                         continue
                     
                     # Create display name for this group using smart formatting
-                    group_label = format_parameter_legend(group_key, best_param_values)
+                    group_label = format_parameter_legend(group_key, best_param_values, max_length=100)
                     
                     # Extract power law parameters for the best run
                     config = best_run['config']
@@ -1906,7 +1906,7 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
                     continue
                 
                 # Create display name for this group using smart formatting
-                group_label = format_parameter_legend(group_key, best_param_values)
+                group_label = format_parameter_legend(group_key, best_param_values, max_length=100)
                 
                 # Store the best run's data
                 config = best_run['config']
@@ -2142,7 +2142,8 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     if optimize_params:
         # Parameter optimization mode - load and optimize parameter combinations for both baselines
         print("Loading with Ridge baseline optimization...")
-        ridge_loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params, 'Ridge')
+        #ridge_loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params, 'Ridge')
+        ridge_loaded_data = {'logs': {}, 'metadata': {}, 'run_labels': []}  # Empty Ridge dat
         print("Loading with True baseline optimization...")  
         true_loaded_data = load_all_logs_with_param_optimization(run_paths, run_labels, optimize_params, 'True')
     else:
