@@ -15,8 +15,8 @@ task:
   task_seed: 102
   noise_seed: 103
   data_scale: 1.0
-  task_scale: 1.0
-  noise_scale: 0.5
+  task_scale: 2.0
+  noise_scale: 0.1
   clip: null
   use_weights: false
   use_weight_sampling: false
@@ -86,8 +86,8 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      task.use_weights: true, false
       task.distrib_param: 5.0, 10.0
+      task.use_weights: true, false
       # training.weight_decay: 0.01, 0.1, 0.5
       # training.lr: 1e-3
       # add_seed: 1
