@@ -44,7 +44,7 @@ training:
   warmup_steps: 100_000
   total_steps: 500_000
   weight_decay: 0.1
-  clip_max_norm: 20.0
+  clip_max_norm: null
 
 eval:
   n_samples: 2048
@@ -87,5 +87,5 @@ hydra:
   sweeper:
     params:
       # task.distrib_param: inf
-      task.use_weights: false
-      task.distrib_param: 3.0, 5.0, 10.0, inf
+      task.use_weights: true, false
+      task.distrib_param: 5.0, 10.0
