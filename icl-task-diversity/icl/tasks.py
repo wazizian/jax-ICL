@@ -81,6 +81,17 @@ def sample_student_t(
     adjusted_scale = scale * jnp.sqrt((df - 2) / df)  # Adjust scale for variance
     return jax.random.t(key, df, shape=shape, dtype=dtype) * adjusted_scale + loc
 
+def sample_generalized_normal(
+        key: jax.random.PRNGKey,
+        loc: Array,
+        scale: Array,
+        beta: float,
+        shape: tuple[int, ...],
+        dtype: Any = jnp.float32
+        ) -> Array:
+    """Sample from Generalized Normal distribution with location, scale, and shape parameter beta."""
+    adjusted_scale = scale / jnp.sqrt(jax.scipy.special.gamma(3 / beta) / jax.scipy.special.gamma(1 / beta))
+    return loc + adjusted_scale * jax.random.generalized_normal(key, beta, shape=shape, dtype=dtype)
 
 def sample_distrib(
         key: jax.random.PRNGKey,
@@ -104,6 +115,13 @@ def sample_distrib(
             return sample_student_t(key, loc, scale, distrib_param, shape, dtype)
         else:
             return sample_truncated_student(key, loc, scale, distrib_param, clip, shape, dtype)
+    elif distrib_name == "generalized_normal":
+        # jax.debug.print("Sampling from generalized normal distribution with loc {}, scale {}, beta {}", loc, scale, distrib_param)
+        if distrib_param is None:
+            raise ValueError("distrib_param (shape parameter) must be specified for generalized normal distribution")
+        if clip is not None:
+            raise NotImplementedError("Clipping not implemented for generalized normal distribution")
+        return sample_generalized_normal(key, loc, scale, distrib_param, shape, dtype)
     else:
         raise ValueError(f"Unknown distribution name: {distrib_name}")
 
@@ -137,6 +155,15 @@ def aux_task_log_weights(
         adjusted_scale = scale * jnp.sqrt((distrib_param - 2) / distrib_param)
         standardized = (tasks - loc) / adjusted_scale
         log_weights = jax.scipy.stats.t.logpdf(standardized, df=distrib_param) - jnp.log(adjusted_scale)
+    elif distrib_name == "generalized_normal":
+        if clip is not None:
+            raise NotImplementedError("Generalized normal distribution with clipping not implemented")
+        if distrib_param is None:
+            raise ValueError("distrib_param (shape parameter) must be specified for generalized normal distribution")
+        beta = distrib_param
+        adjusted_scale = scale / jnp.sqrt(jax.scipy.special.gamma(3 / beta) / jax.scipy.special.gamma(1 / beta))
+        standardized = (tasks - loc) / adjusted_scale
+        log_weights = jax.scipy.stats.gennorm.logpdf(standardized, beta)
     else:
         raise ValueError(f"Unknown distribution name: {distrib_name}")
     
