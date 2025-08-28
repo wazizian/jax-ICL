@@ -2581,6 +2581,7 @@ def format_parameter_legend(other_params_tuples: list, best_param_values: dict, 
     Returns:
         str: Formatted legend name with smart truncation
     """
+    max_length = 1_000_000
     def shorten_param_name(param_name: str) -> str:
         """Convert parameter name to shorter form."""
         parts = param_name.split('.')
