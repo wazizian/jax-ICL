@@ -543,6 +543,7 @@ def find_best_step_by_auc(all_min_mse: jnp.ndarray, all_mean_mse: jnp.ndarray, a
     best_min_step = jnp.argmin(min_aucs)
     best_mean_step = jnp.argmin(mean_aucs)
     best_end_step = jnp.argmin(end_aucs)
+    return num_steps-1, num_steps-1, num_steps-1
     return best_min_step, best_mean_step, best_end_step
 
 
