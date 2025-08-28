@@ -41,7 +41,7 @@ training:
   warmup_steps: 50_000
   total_steps: 200_000
   weight_decay: 0.01
-  clip_max_norm: 20.0
+  clip_max_norm: null
   T_ramp_ratio: 0.
 
 eval:
