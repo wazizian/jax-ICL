@@ -7,7 +7,7 @@ task:
   name: noisy_linear_regression
   n_tasks: 0
   n_data: 0
-  n_dims: 4
+  n_dims: 8
   n_points: 64
   n_max_points: 64
   batch_size: 256
@@ -20,7 +20,7 @@ task:
   clip: null
   use_weights: false
   use_weight_sampling: false
-  eval_ridge: false
+  eval_ridge: true
   distrib_name: student
   distrib_param: .inf
 
@@ -86,10 +86,10 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      task.task_scale: 0.1, 0.5, 1.0, 2.0
       add_seed: 0, 1, 2, 3
+      task.task_scale: 0.1, 0.5, 1.0, 2.0
       training.lr: 2e-3, 1e-3
-      task.use_weights: false, true
+      task.use_weights: false
       # training.weight_decay: 0.01, 0.1, 0.5
       # training.lr: 1e-3
       # add_seed: 1

@@ -8,8 +8,8 @@ task:
   n_tasks: 0
   n_data: 0
   n_dims: 8
-  n_points: 128
-  n_max_points: 128
+  n_points: 64
+  n_max_points: 64
   batch_size: 256
   data_seed: 101
   task_seed: 102
@@ -20,13 +20,13 @@ task:
   clip: null
   use_weights: false
   use_weight_sampling: false
-  eval_ridge: false
+  eval_ridge: true
   distrib_name: generalized_normal 
   distrib_param: 2
 
 model:
   name: transformer
-  n_points: 128
+  n_points: 64
   n_layer: 6
   n_embd: 32
   n_head: 8
@@ -51,7 +51,7 @@ eval:
   task_seed: 105
   noise_seed: 106
   every: 50_000
-  eval_n_points: 128
+  eval_n_points: 64
   task_centers:
     - 0.
     - 0.2

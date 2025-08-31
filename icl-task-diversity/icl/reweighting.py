@@ -59,7 +59,7 @@ def soft_hard_clip(log_weights: Array) -> Array:
     upper_bound = jnp.percentile(log_weights, 99.5)
     lower_bound = jnp.log(1e-6) + jnp.median(log_weights)
     
-    return jnp.clip(log_weights, lower_bound, upper_bound)
+    return jnp.clip(log_weights, lower_bound, None)
 
 def renormalize_weights(log_weights: Array) -> Array:
     """
