@@ -28,6 +28,19 @@ import time
 # Global configuration for parallel processing
 MAX_NUM_CPUS = min(8, multiprocessing.cpu_count())
 
+def filter_load_file(file_path):
+    """Load a safetensor file but filter out keys that end in 'Std'.
+    
+    Args:
+        file_path: Path to the safetensor file
+    
+    Returns:
+        dict: Filtered tensor dictionary without Std keys
+    """
+    tensors = load_file(file_path)
+    # Filter out keys ending with 'Std'
+    filtered_tensors = {k: v for k, v in tensors.items() if not k.endswith('_Std')}
+    return filtered_tensors
 
 def get_most_recent_run() -> str:
     """Find the most recent run ID in the outputs directory."""
@@ -155,7 +168,7 @@ def load_safetensor_file(file_info: tuple) -> tuple:
     file_path, file_index = file_info
     
     try:
-        tensors = load_file(file_path)
+        tensors = filter_load_file(file_path)
         return file_index, tensors, True, None
     except Exception as e:
         return file_index, None, False, str(e)
@@ -1949,73 +1962,6 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
     
     loaded_data['run_labels'] = actual_run_labels
     return loaded_data
-
-
-def process_loaded_data_for_baseline(loaded_data: dict, baseline_type: str) -> tuple[dict, dict, dict, dict]:
-    """Process pre-loaded data for a specific baseline without any I/O.
-    
-    Args:
-        loaded_data: Dictionary returned by load_all_logs()
-        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
-    
-    Returns:
-        tuple: (min_mse_dict, mean_mse_dict, end_mse_dict, selected_steps_dict) where:
-            min_mse_dict: {run_label: [(task_center, min_mse, task_name), ...]}
-            mean_mse_dict: {run_label: [(task_center, mean_mse, task_name), ...]}
-            end_mse_dict: {run_label: [(task_center, end_mse, task_name), ...]}
-            selected_steps_dict: {run_label: {task_name: (min_step, mean_step, end_step)}}
-    """
-    min_mse_data = {}
-    mean_mse_data = {}
-    end_mse_data = {}
-    selected_steps_data = {}
-    
-    for run_label in loaded_data['run_labels']:
-        log = loaded_data['logs'][run_label]
-        config, task_centers = loaded_data['metadata'][run_label]
-        
-        # Extract minimum MSE, mean MSE, and end MSE over context length for all tasks
-        try:
-            min_mse_params, mean_mse_params, end_mse_params, selected_steps = extract_min_mse_params_for_baseline(
-                log, baseline_type, return_selected_steps=True
-            )
-            
-            min_mse_run_data = []
-            mean_mse_run_data = []
-            end_mse_run_data = []
-            
-            # Add Test tasks (task center = 0)
-            if "Test tasks" in min_mse_params:
-                min_mse = min_mse_params["Test tasks"]
-                mean_mse = mean_mse_params.get("Test tasks", 0)
-                end_mse = end_mse_params.get("Test tasks", 0)
-                min_mse_run_data.append((0.0, min_mse, "Test tasks"))
-                mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
-                end_mse_run_data.append((0.0, end_mse, "Test tasks"))
-            
-            # Add Fixed tasks
-            for task_center in task_centers:
-                task_name = f"Fixed task {task_center}"
-                if task_name in min_mse_params:
-                    min_mse = min_mse_params[task_name]
-                    mean_mse = mean_mse_params.get(task_name, 0)
-                    end_mse = end_mse_params.get(task_name, 0)
-                    min_mse_run_data.append((task_center, min_mse, task_name))
-                    mean_mse_run_data.append((task_center, mean_mse, task_name))
-                    end_mse_run_data.append((task_center, end_mse, task_name))
-            
-            if min_mse_run_data:
-                min_mse_data[run_label] = min_mse_run_data
-                mean_mse_data[run_label] = mean_mse_run_data
-                end_mse_data[run_label] = end_mse_run_data
-                selected_steps_data[run_label] = selected_steps
-                
-        except Exception as e:
-            print(f"Warning: Failed to process {baseline_type} baseline for {run_label}: {e}")
-            continue
-    
-    return min_mse_data, mean_mse_data, end_mse_data, selected_steps_data
-
 
 def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_type: str) -> dict[int, tuple[dict, dict, dict, dict]]:
     """Process pre-loaded data for a specific baseline at multiple sequence length prefixes without any I/O.

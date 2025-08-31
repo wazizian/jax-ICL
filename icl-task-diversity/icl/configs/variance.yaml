@@ -50,7 +50,7 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 5_000
+  every: 50_000
   eval_n_points: 64
   task_centers:
     - 0.
@@ -87,6 +87,9 @@ hydra:
   sweeper:
     params:
       task.task_scale: 0.1, 0.5, 1.0, 2.0
+      add_seed: 0, 1, 2, 3
+      training.lr: 2e-3, 1e-3
+      task.use_weights: false, true
       # training.weight_decay: 0.01, 0.1, 0.5
       # training.lr: 1e-3
       # add_seed: 1

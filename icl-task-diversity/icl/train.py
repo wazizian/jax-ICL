@@ -225,19 +225,73 @@ def train(config: ConfigDict) -> None:
     alpha0 = config.training.get("alpha0", 0.5)
     T_ramp_ratio = config.training.get("T_ramp_ratio", 0.4)
 
+    # Create eval results directory
+    eval_results_dir = exp_dir / "eval_results"
+    eval_results_dir.mkdir(exist_ok=True)
+
     # Evaluate baselines
     logging.info("Evaluate Baselines...")
     bsln_preds = get_bsln_preds(train_task, j_samplers_eval_batch, config.eval.n_samples, config.eval.batch_size)
+
+    logging.info("=== Base evaluation ===")
+    eval_tensors = {}
+    for _task_name, _task_preds in bsln_preds.items():
+        logging.info(f"Task: {_task_name}")
+        if len(_task_preds) == 2:
+            (_bsln_name1, _bsln_preds1), (_bsln_name2, _bsln_preds2) = list(_task_preds.items())
+            _errs = error_per_sample_and_seq_pos(_bsln_preds1, _bsln_preds2) / config.task.n_dims
+            _rel_errs = relative_error(_bsln_preds1, _bsln_preds2)
+            chex.assert_shape(_errs, (config.eval.n_samples, config.eval.eval_n_points))
+            chex.assert_shape(_rel_errs, (config.eval.n_samples, config.eval.eval_n_points))
+
+            avg_errs = jnp.mean(_errs, axis=0)  # Mean over samples
+            avg_rel_errs = jnp.mean(_rel_errs, axis=0)
+            chex.assert_shape(avg_errs, (config.eval.eval_n_points,))
+            chex.assert_shape(avg_rel_errs, (config.eval.eval_n_points,))
+
+            std_errs = jnp.std(_errs, axis=0)  # Std over samples
+            std_rel_errs = jnp.std(_rel_errs, axis=0)
+            chex.assert_shape(std_errs, (config.eval.eval_n_points,))
+            chex.assert_shape(std_rel_errs, (config.eval.eval_n_points,))
+
+            avg_err = _errs.mean().item()
+            avg_rel_err = _rel_errs.mean().item()
+            
+            # Convert to numpy for safetensors (JAX arrays need to be converted)
+            _errs_np = jnp.asarray(avg_errs)
+            _rel_errs_np = jnp.asarray(avg_rel_errs)
+            
+            # Store in tensors dict with safe key names
+            safe_task_name = _task_name.replace(" ", "_").replace(".", "_")
+            safe_bsln_name1 = _bsln_name1.replace(" ", "_").replace(".", "_")
+            safe_bsln_name2 = _bsln_name2.replace(" ", "_").replace(".", "_")
+            tensor_key_mse = f"{safe_task_name}_{safe_bsln_name1}_vs_{safe_bsln_name2}_MSE"
+            tensor_key_rel = f"{safe_task_name}_{safe_bsln_name1}_vs_{safe_bsln_name2}_RelErr"
+            
+            eval_tensors[tensor_key_mse] = _errs_np
+            eval_tensors[tensor_key_rel] = _rel_errs_np
+
+            tensor_key_std_mse = f"{safe_task_name}_{safe_bsln_name1}_vs_{safe_bsln_name2}_MSE_Std"
+            tensor_key_std_rel = f"{safe_task_name}_{safe_bsln_name1}_vs_{safe_bsln_name2}_RelErr_Std"
+            eval_tensors[tensor_key_std_mse] = jnp.asarray(std_errs)
+            eval_tensors[tensor_key_std_rel] = jnp.asarray(std_rel_errs)
+            
+            # Continue with original logging
+            # log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
+            # log[f"eval/{_task_name}"][f"Transformer | {_bsln_name} (RelErr)"].append(_rel_errs.tolist())
+
+            logging.info(f"  { _bsln_name1 } vs { _bsln_name2 }: MSE={avg_err:.6f}, RelErr={avg_rel_err:.6f}")
+    
+    # Save evaluation results as safetensor file
+    eval_step_file = eval_results_dir / f"baseline_eval_step.safetensors"
+    save_file(eval_tensors, eval_step_file)
+    logging.info(f"Saved evaluation results to: {eval_step_file}")
 
     # Loggers
     log = _init_log(bsln_preds, config.task.n_dims)
 
     # Setup checkpoint manager
     ckpt_mngr = ocp.CheckpointManager(exp_dir)
-    
-    # Create eval results directory
-    eval_results_dir = exp_dir / "eval_results"
-    eval_results_dir.mkdir(exist_ok=True)
     
     # Training loop
     logging.info("Start Train Loop")
@@ -323,12 +377,25 @@ def train(config: ConfigDict) -> None:
                 for _bsln_name, _bsln_preds in _task_preds.items():
                     _errs = error_per_sample_and_seq_pos(eval_preds[_task_name]["Transformer"], _bsln_preds) / config.task.n_dims
                     _rel_errs = relative_error(eval_preds[_task_name]["Transformer"], _bsln_preds)
+                    chex.assert_shape(_errs, (config.eval.n_samples, config.eval.eval_n_points))
+                    chex.assert_shape(_rel_errs, (config.eval.n_samples, config.eval.eval_n_points))
+
+                    avg_errs = jnp.mean(_errs, axis=0)  # Mean over samples
+                    avg_rel_errs = jnp.mean(_rel_errs, axis=0)
+                    chex.assert_shape(avg_errs, (config.eval.eval_n_points,))
+                    chex.assert_shape(avg_rel_errs, (config.eval.eval_n_points,))
+
+                    std_errs = jnp.std(_errs, axis=0)  # Std over samples
+                    std_rel_errs = jnp.std(_rel_errs, axis=0)
+                    chex.assert_shape(std_errs, (config.eval.eval_n_points,))
+                    chex.assert_shape(std_rel_errs, (config.eval.eval_n_points,))
+
                     avg_err = _errs.mean().item()
                     avg_rel_err = _rel_errs.mean().item()
                     
                     # Convert to numpy for safetensors (JAX arrays need to be converted)
-                    _errs_np = jnp.asarray(_errs)
-                    _rel_errs_np = jnp.asarray(_rel_errs)
+                    _errs_np = jnp.asarray(avg_errs)
+                    _rel_errs_np = jnp.asarray(avg_rel_errs)
                     
                     # Store in tensors dict with safe key names
                     safe_task_name = _task_name.replace(" ", "_").replace(".", "_")
@@ -338,6 +405,11 @@ def train(config: ConfigDict) -> None:
                     
                     eval_tensors[tensor_key_mse] = _errs_np
                     eval_tensors[tensor_key_rel] = _rel_errs_np
+
+                    tensor_key_std_mse = f"{safe_task_name}_Transformer_vs_{safe_bsln_name}_MSE_Std"
+                    tensor_key_std_rel = f"{safe_task_name}_Transformer_vs_{safe_bsln_name}_RelErr_Std"
+                    eval_tensors[tensor_key_std_mse] = jnp.asarray(std_errs)
+                    eval_tensors[tensor_key_std_rel] = jnp.asarray(std_rel_errs)
                     
                     # Continue with original logging
                     # log[f"eval/{_task_name}"][f"Transformer | {_bsln_name}"].append(_errs.tolist())
