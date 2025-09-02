@@ -187,7 +187,7 @@ def train(config: ConfigDict) -> None:
 
     # Model, optimizer and lr schedule
     model = get_model(**config.model, dtype=jnp.dtype(config.dtype))
-    logging.info(u.tabulate_model(model, config.task.n_dims, config.model.n_points, config.task.batch_size))
+    #logging.info(u.tabulate_model(model, config.task.n_dims, config.model.n_points, config.task.batch_size))
     params, dropout_rng = initialize(model, config)
     clip_max_norm = config.training.get("clip_max_norm", float("inf"))
     if "clip_max_norm" not in config.training:

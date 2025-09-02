@@ -7,10 +7,9 @@ task:
   name: mlp_sde
   n_tasks: 0
   n_data: 0
-  n_dims: 4 
-  n_points: 64
-  n_max_points: 64
-  use_curriculum: false
+  n_dims: 4               # Ending dimensions (will grow to max_n_dims)
+  n_points: 16            # Starting n_points (will grow with curriculum)
+  n_max_points: 64        # Ending n_points (should match model n_points)
   batch_size: 256
   data_seed: 101
   task_seed: 102
@@ -24,7 +23,22 @@ task:
   distrib_name: student
   distrib_param: .inf
   ou_step: 0.8
-  hidden_size: 16
+  hidden_size: 16          # Ending hidden size
+
+  # Extended Curriculum Learning Configuration
+  use_curriculum: true              # Enable curriculum learning
+  curriculum_steps_thresh: 10_000        # Steps between increments (reduced for fast testing)
+  curriculum_n_points_increment: 4  # How much to increase n_points
+  
+  # New curriculum dimensions (using auto-defaults for initial testing)
+  # max_hidden_size: auto-set to hidden_size
+  curriculum_hidden_increment: 2   # How much to increase hidden size
+  min_hidden_size: 2               # Starting hidden size
+  
+  # max_n_dims: auto-set to n_dims
+  curriculum_dims_increment: 1     # How much to increase dimensions  
+  min_n_dims: 1                   # Starting dimensions
+
 
 model:
   name: single_seq_transformer
@@ -54,7 +68,11 @@ eval:
   noise_seed: 106
   every: 20_000
   eval_n_points: 64
-  task_centers: []
+  task_centers:
+    - 0.0
+    - 0.1
+    - 0.2
+    - 0.3
 
 # Hydra settings
 hydra:

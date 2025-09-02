@@ -578,7 +578,9 @@ class MLPDrift(nn.Module):
             drift: Drift vector of same shape as input
         """
         h = jax.nn.tanh(self.dense1(x))
-        return self.dense2(h)
+        h = self.dense2(h)
+        normalized_h = jnp.clip(h, -1.0, 1.0)  # Clip to prevent extreme drift values
+        res = normalized_h - 1e-4 * x  # Add small linear term for stability
 
 ########################################################################################################################
 # Ornstein-Uhlenbeck Process Task for In-Context Learning
@@ -1002,6 +1004,17 @@ class MLPSDETask:
     ou_step: float = 1e-2
     hidden_size: int | None = None  # MLP hidden size, defaults to 2*n_dims
     task_n_dims: int | None = None  # Automatically computed based on MLP parameters
+    
+    # Extended curriculum learning parameters - use defaults that match base parameters
+    max_hidden_size: int = 0  # Maximum MLP hidden size (will be set to hidden_size if 0)
+    curriculum_hidden_increment: int = 1  # How much to increase hidden size each step
+    min_hidden_size: int = 1  # Starting hidden size for curriculum
+    max_n_dims: int = 0  # Maximum state dimensionality (will be set to n_dims if 0)
+    curriculum_dims_increment: int = 1  # How much to increase dimensions each step
+    min_n_dims: int = 1  # Starting dimensions for curriculum
+    current_hidden_size: int | None = None
+    current_n_dims: int | None = None
+    
     _skip_init: bool = False  # Private parameter to skip __post_init__ logic
 
     def __post_init__(self):
@@ -1015,10 +1028,18 @@ class MLPSDETask:
         # Set hidden size if not provided
         if self.hidden_size is None:
             self.hidden_size = 2 * self.n_dims
+            
+        # Set up extended curriculum parameters
+        self.max_hidden_size = self.hidden_size if self.max_hidden_size == 0 else self.max_hidden_size
+        self.max_n_dims = self.n_dims if self.max_n_dims == 0 else self.max_n_dims
         
-        # **CRITICAL CHANGE**: Compute task_n_dims based on MLP parameters
-        # MLP has: W1 (n_dims x hidden_size), b1 (hidden_size), W2 (hidden_size x n_dims), b2 (n_dims)
-        self.task_n_dims = self.n_dims * self.hidden_size + self.hidden_size + self.hidden_size * self.n_dims + self.n_dims
+        # Initialize current curriculum state
+        self.current_hidden_size = self.min_hidden_size if self.use_curriculum else self.max_hidden_size
+        self.current_n_dims = self.min_n_dims if self.use_curriculum else self.max_n_dims
+        
+        # **CRITICAL CHANGE**: Compute task_n_dims based on MAX MLP parameters for shape consistency
+        # MLP has: W1 (max_n_dims x max_hidden_size), b1 (max_hidden_size), W2 (max_hidden_size x max_n_dims), b2 (max_n_dims)
+        self.task_n_dims = self.max_n_dims * self.max_hidden_size + self.max_hidden_size + self.max_hidden_size * self.max_n_dims + self.max_n_dims
         
         self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
         self.task_center = 0.0 if self.task_center is None else self.task_center
@@ -1055,80 +1076,98 @@ class MLPSDETask:
         params = tasks[:, :, 0]  # Shape: (batch_size, task_n_dims)
         chex.assert_shape(params, (batch_size_actual, self.task_n_dims))
         
-        # Extract MLP parameters
+        # Extract MLP parameters using MAX dimensions for shape consistency
         idx = 0
         
-        # W1: (batch_size, n_dims, hidden_size)
-        W1_size = self.n_dims * self.hidden_size
-        W1 = params[:, idx:idx+W1_size].reshape(batch_size_actual, self.n_dims, self.hidden_size)
+        # W1: (batch_size, max_n_dims, max_hidden_size)
+        W1_size = self.max_n_dims * self.max_hidden_size
+        W1 = params[:, idx:idx+W1_size].reshape(batch_size_actual, self.max_n_dims, self.max_hidden_size)
         idx += W1_size
-        chex.assert_shape(W1, (batch_size_actual, self.n_dims, self.hidden_size))
+        chex.assert_shape(W1, (batch_size_actual, self.max_n_dims, self.max_hidden_size))
         
-        # b1: (batch_size, hidden_size)  
-        b1 = params[:, idx:idx+self.hidden_size]
-        idx += self.hidden_size
-        chex.assert_shape(b1, (batch_size_actual, self.hidden_size))
+        # b1: (batch_size, max_hidden_size)  
+        b1 = params[:, idx:idx+self.max_hidden_size]
+        idx += self.max_hidden_size
+        chex.assert_shape(b1, (batch_size_actual, self.max_hidden_size))
         
-        # W2: (batch_size, hidden_size, n_dims)
-        W2_size = self.hidden_size * self.n_dims
-        W2 = params[:, idx:idx+W2_size].reshape(batch_size_actual, self.hidden_size, self.n_dims)
+        # W2: (batch_size, max_hidden_size, max_n_dims)
+        W2_size = self.max_hidden_size * self.max_n_dims
+        W2 = params[:, idx:idx+W2_size].reshape(batch_size_actual, self.max_hidden_size, self.max_n_dims)
         idx += W2_size
-        chex.assert_shape(W2, (batch_size_actual, self.hidden_size, self.n_dims))
+        chex.assert_shape(W2, (batch_size_actual, self.max_hidden_size, self.max_n_dims))
         
-        # b2: (batch_size, n_dims)
-        b2 = params[:, idx:idx+self.n_dims]
-        chex.assert_shape(b2, (batch_size_actual, self.n_dims))
+        # b2: (batch_size, max_n_dims)
+        b2 = params[:, idx:idx+self.max_n_dims]
+        chex.assert_shape(b2, (batch_size_actual, self.max_n_dims))
         
         # Verify we consumed all parameters
-        chex.assert_equal(idx + self.n_dims, self.task_n_dims)
+        chex.assert_equal(idx + self.max_n_dims, self.task_n_dims)
         
         return {'W1': W1, 'b1': b1, 'W2': W2, 'b2': b2}
 
     def apply_mlp_drift(self, x: Array, mlp_params: dict) -> Array:
         """
-        **CRITICAL CHANGE**: Apply MLP drift function b(x) instead of linear drift.
+        **CRITICAL CHANGE**: Apply MLP drift function b(x) with curriculum masking.
         
         Args:
-            x: State of shape (batch_size, n_points, n_dims) - ALWAYS has n_points dimension
-            mlp_params: Dictionary with MLP parameters
+            x: State of shape (batch_size, n_points, current_n_dims) - ALWAYS has n_points dimension
+            mlp_params: Dictionary with MLP parameters (using max dimensions)
         
         Returns:
             drift: Drift vector of same shape as x
         """
         batch_size_actual, n_points_actual, n_dims_actual = x.shape
         chex.assert_shape(x, (batch_size_actual, n_points_actual, n_dims_actual))
-        chex.assert_equal(n_dims_actual, self.n_dims)
+        assert n_dims_actual <= self.max_n_dims, f"Input n_dims {n_dims_actual} exceeds max_n_dims {self.max_n_dims}"
         
-        # MLP parameters should match batch size and dimensions
-        chex.assert_shape(mlp_params['W1'], (batch_size_actual, self.n_dims, self.hidden_size))
-        chex.assert_shape(mlp_params['b1'], (batch_size_actual, self.hidden_size))
-        chex.assert_shape(mlp_params['W2'], (batch_size_actual, self.hidden_size, self.n_dims))
-        chex.assert_shape(mlp_params['b2'], (batch_size_actual, self.n_dims))
+        # MLP parameters should match batch size and MAX dimensions
+        chex.assert_shape(mlp_params['W1'], (batch_size_actual, self.max_n_dims, self.max_hidden_size))
+        chex.assert_shape(mlp_params['b1'], (batch_size_actual, self.max_hidden_size))
+        chex.assert_shape(mlp_params['W2'], (batch_size_actual, self.max_hidden_size, self.max_n_dims))
+        chex.assert_shape(mlp_params['b2'], (batch_size_actual, self.max_n_dims))
         
-        def single_point_mlp(x_point, W1, b1, W2, b2):
-            """Apply MLP to a single point: x_point has shape (n_dims,)"""
+        def single_point_mlp_with_masking(x_point, W1, b1, W2, b2):
+            """Apply MLP to a single point with curriculum masking."""
             chex.assert_shape(x_point, (n_dims_actual,))
-            chex.assert_shape(W1, (self.n_dims, self.hidden_size))
-            chex.assert_shape(b1, (self.hidden_size,))
-            chex.assert_shape(W2, (self.hidden_size, self.n_dims))
-            chex.assert_shape(b2, (self.n_dims,))
+            chex.assert_shape(W1, (self.max_n_dims, self.max_hidden_size))
+            chex.assert_shape(b1, (self.max_hidden_size,))
+            chex.assert_shape(W2, (self.max_hidden_size, self.max_n_dims))
+            chex.assert_shape(b2, (self.max_n_dims,))
             
-            # Forward pass: x -> h -> drift
-            h = jax.nn.tanh(x_point @ W1 + b1)  # (hidden_size,)
-            drift = h @ W2 + b2  # (n_dims,)
+            # Pad input to max dimensions (zero-pad extra dimensions)
+            x_padded = jnp.concatenate([x_point, jnp.zeros(self.max_n_dims - n_dims_actual, dtype=x_point.dtype)])
+            chex.assert_shape(x_padded, (self.max_n_dims,))
             
-            chex.assert_shape(h, (self.hidden_size,))
-            chex.assert_shape(drift, (self.n_dims,))
-            return drift
+            # Forward pass: x -> h -> drift with masking
+            h_full = jax.nn.tanh(x_padded @ W1 + b1)  # (max_hidden_size,)
+            chex.assert_shape(h_full, (self.max_hidden_size,))
+            
+            # Apply hidden dimension mask
+            hidden_mask = jnp.concatenate([
+                jnp.ones(self.current_hidden_size, dtype=h_full.dtype),
+                jnp.zeros(self.max_hidden_size - self.current_hidden_size, dtype=h_full.dtype)
+            ])
+            h_masked = h_full * hidden_mask
+            chex.assert_shape(h_masked, (self.max_hidden_size,))
+            
+            # Second layer
+            drift_full = h_masked @ W2 + b2  # (max_n_dims,)
+            chex.assert_shape(drift_full, (self.max_n_dims,))
+            
+            # Apply output dimension mask and truncate to current dimensions
+            drift_current = drift_full[:n_dims_actual]  # (n_dims_actual,)
+            chex.assert_shape(drift_current, (n_dims_actual,))
+            
+            return drift_current
         
         # Use vmap to handle n_points dimension: vmap over both points and batch
         # First vmap over n_points, then over batch
-        batched_mlp = jax.vmap(jax.vmap(single_point_mlp, in_axes=(0, None, None, None, None)), 
+        batched_mlp = jax.vmap(jax.vmap(single_point_mlp_with_masking, in_axes=(0, None, None, None, None)), 
                               in_axes=(0, 0, 0, 0, 0))
         
         drift = batched_mlp(x, mlp_params['W1'], mlp_params['b1'], mlp_params['W2'], mlp_params['b2'])
         
-        chex.assert_shape(drift, (batch_size_actual, n_points_actual, self.n_dims))
+        chex.assert_shape(drift, (batch_size_actual, n_points_actual, n_dims_actual))
         return drift
 
     def generate_task_pool(self) -> Array:
@@ -1246,59 +1285,66 @@ class MLPSDETask:
         mlp_params = self.get_params_from_tasks(tasks)
 
         key = jax.random.fold_in(self.noise_key, step)
-        all_noise = jax.random.normal(key, (self.n_points+1, self.batch_size, self.n_dims), self.dtype) * self.noise_scale
-        chex.assert_shape(all_noise, (self.n_points+1, self.batch_size, self.n_dims))
+        # Generate noise using CURRENT dimensions (curriculum masking)
+        all_noise = jax.random.normal(key, (self.n_points+1, self.batch_size, self.current_n_dims), self.dtype) * self.noise_scale
+        chex.assert_shape(all_noise, (self.n_points+1, self.batch_size, self.current_n_dims))
 
         init = all_noise[0, :, :]
-        chex.assert_shape(init, (self.batch_size, self.n_dims))
+        chex.assert_shape(init, (self.batch_size, self.current_n_dims))
 
         all_noise = all_noise[1:, :, :]
-        chex.assert_shape(all_noise, (self.n_points, self.batch_size, self.n_dims))
+        chex.assert_shape(all_noise, (self.n_points, self.batch_size, self.current_n_dims))
         
         def mlp_sde_step(carry, noise):
-            """**CRITICAL CHANGE**: Use MLP drift instead of linear drift."""
+            """**CRITICAL CHANGE**: Use MLP drift with curriculum dimension masking."""
             prev_state = carry
-            chex.assert_shape(prev_state, (self.batch_size, self.n_dims))
-            chex.assert_shape(noise, (self.batch_size, self.n_dims))
+            chex.assert_shape(prev_state, (self.batch_size, self.current_n_dims))
+            chex.assert_shape(noise, (self.batch_size, self.current_n_dims))
 
-            # MLP drift: -b(X_t) where b is MLP
-            # apply_mlp_drift expects 3D input (batch_size, n_points, n_dims)
+            # MLP drift: -b(X_t) where b is MLP with curriculum masking
+            # apply_mlp_drift expects 3D input (batch_size, n_points, current_n_dims)
             # So we add a singleton n_points dimension
-            prev_state_3d = prev_state[:, None, :]  # (batch_size, 1, n_dims)
-            chex.assert_shape(prev_state_3d, (self.batch_size, 1, self.n_dims))
+            prev_state_3d = prev_state[:, None, :]  # (batch_size, 1, current_n_dims)
+            chex.assert_shape(prev_state_3d, (self.batch_size, 1, self.current_n_dims))
             
             drift_3d = self.apply_mlp_drift(prev_state_3d, mlp_params)
-            chex.assert_shape(drift_3d, (self.batch_size, 1, self.n_dims))
+            chex.assert_shape(drift_3d, (self.batch_size, 1, self.current_n_dims))
             
             # Remove singleton dimension
-            drift = drift_3d[:, 0, :]  # (batch_size, n_dims)
-            chex.assert_shape(drift, (self.batch_size, self.n_dims))
+            drift = drift_3d[:, 0, :]  # (batch_size, current_n_dims)
+            chex.assert_shape(drift, (self.batch_size, self.current_n_dims))
             
             next_state = prev_state - drift * self.ou_step + jnp.sqrt(self.ou_step) * noise
-            chex.assert_shape(next_state, (self.batch_size, self.n_dims))
+            chex.assert_shape(next_state, (self.batch_size, self.current_n_dims))
 
             return next_state, next_state
             
         # Run the MLP SDE for n_points steps
         _, sde_steps = jax.lax.scan(mlp_sde_step, init, all_noise)
-        chex.assert_shape(sde_steps, (self.n_points, self.batch_size, self.n_dims))
+        chex.assert_shape(sde_steps, (self.n_points, self.batch_size, self.current_n_dims))
 
-        sde_steps = jnp.transpose(sde_steps, (1, 0, 2))  # Shape: (batch_size, n_points, n_dims)
-        chex.assert_shape(sde_steps, (self.batch_size, self.n_points, self.n_dims))
+        sde_steps = jnp.transpose(sde_steps, (1, 0, 2))  # Shape: (batch_size, n_points, current_n_dims)
+        chex.assert_shape(sde_steps, (self.batch_size, self.n_points, self.current_n_dims))
 
-        # Final assertions on return values
+        # Final assertions on return values using current curriculum dimensions
         init_bs, init_dims = init.shape
         chex.assert_shape(init, (init_bs, init_dims))
         chex.assert_equal(init_bs, self.batch_size)
-        chex.assert_equal(init_dims, self.n_dims)
+        chex.assert_equal(init_dims, self.current_n_dims)
         
         sde_bs, sde_points, sde_dims = sde_steps.shape
         chex.assert_shape(sde_steps, (sde_bs, sde_points, sde_dims))
         chex.assert_equal(sde_bs, self.batch_size)
         chex.assert_equal(sde_points, self.n_points)
-        chex.assert_equal(sde_dims, self.n_dims)
+        chex.assert_equal(sde_dims, self.current_n_dims)
 
-        return init, sde_steps
+        new_init = jnp.concatenate([init, jnp.zeros((self.batch_size, self.max_n_dims - self.current_n_dims), dtype=init.dtype)], axis=1)
+        chex.assert_shape(new_init, (self.batch_size, self.max_n_dims))
+
+        new_sde_steps = jnp.concatenate([sde_steps, jnp.zeros((self.batch_size, self.n_points, self.max_n_dims - self.current_n_dims), dtype=sde_steps.dtype)], axis=2)
+        chex.assert_shape(new_sde_steps, (self.batch_size, self.n_points, self.max_n_dims))
+
+        return new_init, new_sde_steps
 
     @jax.jit
     def generate_attention_mask(self) -> Array:
@@ -1327,11 +1373,33 @@ class MLPSDETask:
         return mask
 
     def curriculum_increment(self):
+        """Enhanced curriculum learning that can increment multiple dimensions."""
+        changes = []
+        
+        # Increment n_points (original curriculum)
         old_n_points = self.n_points
         self.n_points = min(self.n_points + self.curriculum_n_points_increment, 
                            self.n_max_points)
         if self.n_points > old_n_points:
-            logging.info(f"Curriculum increment: n_points {old_n_points} -> {self.n_points}")
+            changes.append(f"n_points {old_n_points} -> {self.n_points}")
+        
+        # Increment hidden size curriculum
+        old_hidden_size = self.current_hidden_size
+        self.current_hidden_size = min(self.current_hidden_size + self.curriculum_hidden_increment,
+                                     self.max_hidden_size)
+        if self.current_hidden_size > old_hidden_size:
+            changes.append(f"hidden_size {old_hidden_size} -> {self.current_hidden_size}")
+        
+        # Increment dimension curriculum  
+        old_n_dims = self.current_n_dims
+        self.current_n_dims = min(self.current_n_dims + self.curriculum_dims_increment,
+                                self.max_n_dims)
+        if self.current_n_dims > old_n_dims:
+            changes.append(f"n_dims {old_n_dims} -> {self.current_n_dims}")
+        
+        # Log all changes
+        if changes:
+            logging.info(f"Curriculum increment: {', '.join(changes)}")
 
     def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
@@ -1342,11 +1410,11 @@ class MLPSDETask:
         chex.assert_shape(weights, (self.batch_size, 1))
 
         init, targets = self.evaluate(tasks, step)
-        chex.assert_shape(init, (self.batch_size, self.n_dims))
-        chex.assert_shape(targets, (self.batch_size, self.n_points, self.n_dims))
+        chex.assert_shape(init, (self.batch_size, self.max_n_dims))
+        chex.assert_shape(targets, (self.batch_size, self.n_points, self.max_n_dims))
 
         data = jnp.concatenate((init[:, None, :], targets[:, :-1, :]), axis=1)
-        chex.assert_shape(data, (self.batch_size, self.n_points, self.n_dims))
+        chex.assert_shape(data, (self.batch_size, self.n_points, self.max_n_dims))
 
         attention_mask = self.generate_attention_mask()
         chex.assert_shape(attention_mask, (self.n_max_points, self.n_max_points))
@@ -1356,34 +1424,32 @@ class MLPSDETask:
     @jax.jit
     def evaluate_oracle(self, data: Array, tasks: Array) -> Array:
         """Oracle prediction using MLP drift."""
-        # Identify actual dimensions from input
+        # Identify actual dimensions from input (should match current curriculum dimensions)
         batch_size_actual, n_points_actual, n_dims_actual = data.shape
         chex.assert_shape(data, (batch_size_actual, n_points_actual, n_dims_actual))
-        chex.assert_equal(n_dims_actual, self.n_dims)
+        chex.assert_equal(n_dims_actual, self.max_n_dims)  # Data should always be padded to max_n_dims
         
         task_bs_actual, task_n_dims_actual, one_dim = tasks.shape
         chex.assert_shape(tasks, (task_bs_actual, task_n_dims_actual, one_dim))
-        chex.assert_equal(task_bs_actual, batch_size_actual)  # Should match data batch size
-        chex.assert_equal(task_n_dims_actual, self.task_n_dims)
         chex.assert_equal(one_dim, 1)
 
         mlp_params = self.get_params_from_tasks(tasks)
         prev_states = data 
-        chex.assert_shape(prev_states, (batch_size_actual, n_points_actual, self.n_dims))
+        chex.assert_shape(prev_states, (batch_size_actual, n_points_actual, n_dims_actual))
 
-        # Oracle: apply MLP drift
+        # Oracle: apply MLP drift with curriculum masking
         drift = self.apply_mlp_drift(prev_states, mlp_params)
-        chex.assert_shape(drift, (batch_size_actual, n_points_actual, self.n_dims))
+        chex.assert_shape(drift, (batch_size_actual, n_points_actual, n_dims_actual))
         
         oracle_states = prev_states - drift * self.ou_step
-        chex.assert_shape(oracle_states, (batch_size_actual, n_points_actual, self.n_dims))
+        chex.assert_shape(oracle_states, (batch_size_actual, n_points_actual, n_dims_actual))
 
         # Final assertion on return value
         oracle_bs, oracle_points, oracle_dims = oracle_states.shape
         chex.assert_shape(oracle_states, (oracle_bs, oracle_points, oracle_dims))
         chex.assert_equal(oracle_bs, batch_size_actual)
         chex.assert_equal(oracle_points, n_points_actual)
-        chex.assert_equal(oracle_dims, self.n_dims)
+        chex.assert_equal(oracle_dims, n_dims_actual)
 
         return oracle_states
 
@@ -1491,6 +1557,14 @@ class MLPSDETask:
             'ou_step': self.ou_step,
             'hidden_size': self.hidden_size,
             'task_n_dims': self.task_n_dims,
+            'max_hidden_size': self.max_hidden_size,
+            'curriculum_hidden_increment': self.curriculum_hidden_increment,
+            'min_hidden_size': self.min_hidden_size,
+            'max_n_dims': self.max_n_dims,
+            'curriculum_dims_increment': self.curriculum_dims_increment,
+            'min_n_dims': self.min_n_dims,
+            'current_hidden_size': self.current_hidden_size,
+            'current_n_dims': self.current_n_dims,
         }
         
         return (children, aux_data)
