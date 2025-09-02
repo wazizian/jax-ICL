@@ -26,7 +26,7 @@ task:
   hidden_size: 16          # Ending hidden size
 
   # Extended Curriculum Learning Configuration
-  use_curriculum: true              # Enable curriculum learning
+  use_curriculum: false              # Enable curriculum learning
   curriculum_steps_thresh: 10_000        # Steps between increments (reduced for fast testing)
   curriculum_n_points_increment: 4  # How much to increase n_points
   

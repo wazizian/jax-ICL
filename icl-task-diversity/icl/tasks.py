@@ -1042,6 +1042,7 @@ class MLPSDETask:
         self.task_n_dims = self.max_n_dims * self.max_hidden_size + self.max_hidden_size + self.max_hidden_size * self.max_n_dims + self.max_n_dims
         
         self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
+        self.n_points = self.n_max_points if not self.use_curriculum else self.n_points
         self.task_center = 0.0 if self.task_center is None else self.task_center
         task_pool, weights = self.generate_task_pool() if self.n_tasks > 0 else (None, None)
         self.task_pool = task_pool
