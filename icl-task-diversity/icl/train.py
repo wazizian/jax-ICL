@@ -237,8 +237,17 @@ def train(config: ConfigDict) -> None:
     eval_tensors = {}
     for _task_name, _task_preds in bsln_preds.items():
         logging.info(f"Task: {_task_name}")
-        if len(_task_preds) == 2:
-            (_bsln_name1, _bsln_preds1), (_bsln_name2, _bsln_preds2) = list(_task_preds.items())
+        # Find true baseline
+        _bsln_name1 = None
+        _bsln_preds1 = None
+        for name, preds in _task_preds.items():
+            if name == "True":
+                _bsln_name1 = name
+                _bsln_preds1 = preds
+                break
+        assert _bsln_name1 is not None, "True baseline not found in predictions"
+
+        for _bsln_name2, _bsln_preds2 in _task_preds.items():
             _errs = error_per_sample_and_seq_pos(_bsln_preds1, _bsln_preds2) / config.task.n_dims
             _rel_errs = relative_error(_bsln_preds1, _bsln_preds2)
             chex.assert_shape(_errs, (config.eval.n_samples, config.eval.eval_n_points))

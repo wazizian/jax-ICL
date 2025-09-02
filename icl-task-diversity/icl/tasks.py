@@ -886,7 +886,7 @@ class OrnsteinUhlenbeckTask:
         return eval_tasks
 
     def get_default_eval_models(self) -> list[Model]:
-        return [get_model(name="last_value")]
+        return [get_model(name="last_value"), get_model(name="arma", dtype=self.dtype)]
 
     def _tree_flatten(self):
         # Dynamic values (arrays, keys, and values that can change)
@@ -1449,7 +1449,7 @@ class MLPSDETask:
         return eval_tasks
 
     def get_default_eval_models(self) -> list[Model]:
-        return [get_model(name="last_value")]
+        return [get_model(name="last_value"), get_model(name="arma", dtype=self.dtype)]
 
     def _tree_flatten(self):
         # Dynamic values (arrays, keys, and values that can change)
