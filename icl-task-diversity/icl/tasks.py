@@ -577,10 +577,12 @@ class MLPDrift(nn.Module):
         Returns:
             drift: Drift vector of same shape as input
         """
-        h = jax.nn.tanh(self.dense1(x))
+        h = self.dense1(x)
+        h = nn.gelu(h)
         h = self.dense2(h)
         normalized_h = jnp.clip(h, -1.0, 1.0)  # Clip to prevent extreme drift values
-        res = normalized_h - 1e-4 * x  # Add small linear term for stability
+        res = h - 1e-4 * x  # Add small linear term for stability
+        return res
 
 ########################################################################################################################
 # Ornstein-Uhlenbeck Process Task for In-Context Learning
@@ -1154,6 +1156,10 @@ class MLPSDETask:
             # Second layer
             drift_full = h_masked @ W2 + b2  # (max_n_dims,)
             chex.assert_shape(drift_full, (self.max_n_dims,))
+
+            # Normalize drift to prevent explosion
+            drift_full = jnp.clip(drift_full, -1.0, 1.0)  # Clip to prevent extreme drift values
+            drift_full = drift_full + 0.1 * x_padded  # Add small linear term for stability
             
             # Apply output dimension mask and truncate to current dimensions
             drift_current = drift_full[:n_dims_actual]  # (n_dims_actual,)
