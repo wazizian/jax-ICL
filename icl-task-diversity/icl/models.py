@@ -28,6 +28,8 @@ def get_model_name(model):
         return "LastValue"
     elif isinstance(model, ARMA):
         return "ARMA"
+    elif isinstance(model, CorrectedLastValue):
+        return "CorrectedLastValue"
     else:
         raise ValueError(f"model type={type(model)} not supported")
 
@@ -157,14 +159,42 @@ class LastValue(nn.Module):
         Return:
             batch_size x n_points x n_dims (float)
         """
-        batch_size, n_points, n_dims = targets.shape
+        batch_size, n_points, n_dims = data.shape
 
-        init = jnp.zeros((batch_size, 1, n_dims), dtype=targets.dtype)
-        preds = jnp.concatenate([init, targets[:, :-1, :]], axis=1)  # batch_size x n_points x n_dims
-        chex.assert_shape(preds, (batch_size, n_points, n_dims))
+        return data
 
-        return preds
+class CorrectedLastValue(nn.Module):
+    """
+    A simple model that returns the last value of the input sequence adjusted by the mean change.
+    This is useful for tasks where the last value is the target but with a bias correction.
+    """
 
+    def __call__(self, data: Array, targets: Array) -> Array:
+        """
+        Args:
+            data: batch_size x n_points x n_dims (float)
+            targets: batch_size x n_points x n_dims (float)
+        Return:
+            batch_size x n_points x n_dims (float)
+        """
+        batch_size, n_points, n_dims = data.shape
+        
+        change = data[:, 1:, :] - data[:, :-1, :]  # batch_size x (n_points - 1) x n_dims
+        chex.assert_shape(change, (batch_size, n_points - 1, n_dims))
+
+        cum_sum_change = jnp.cumsum(change, axis=1)  # batch_size x (n_points - 1) x n_dims
+        chex.assert_shape(cum_sum_change, (batch_size, n_points - 1, n_dims))
+
+        average_change = cum_sum_change / jnp.arange(1, n_points).reshape(1, -1, 1)  # batch_size x (n_points - 1) x n_dims
+        chex.assert_shape(average_change, (batch_size, n_points - 1, n_dims))
+
+        padded_average_change = jnp.concatenate([jnp.zeros((batch_size, 1, n_dims), dtype=data.dtype), average_change], axis=1)  # batch_size x n_points x n_dims
+        chex.assert_shape(padded_average_change, (batch_size, n_points, n_dims))
+
+        estimate = data + padded_average_change  # batch_size x n_points x n_dims
+        chex.assert_shape(estimate, (batch_size, n_points, n_dims))
+
+        return estimate
 
 ########################################################################################################################
 # ARMA (AutoRegressive Moving Average)                                                                               #
@@ -437,5 +467,13 @@ Model = Transformer | Ridge | DiscreteMMSE | ARMA
 
 
 def get_model(name: str, **kwargs) -> Model:
-    models = {"transformer": Transformer, "ridge": Ridge, "discrete_mmse": DiscreteMMSE, "single_seq_transformer": SingleSeqTransformer, "last_value": LastValue, "arma": ARMA}
+    models = {
+            "transformer": Transformer,
+            "ridge": Ridge,
+            "discrete_mmse": DiscreteMMSE,
+            "single_seq_transformer": SingleSeqTransformer,
+            "last_value": LastValue,
+            "corrected_last_value": CorrectedLastValue,
+            "arma": ARMA
+            }
     return models[name](**kwargs)
