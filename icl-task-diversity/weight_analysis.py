@@ -12,11 +12,13 @@ from task_shift import normalize_error_values, find_valid_multirun_subdirs
 from mean_min_best_mse import load_all_logs
 
 
-def format_task_name_for_display(task_name):
+def format_task_name_for_display(task_name, metric_name):
     """Format task name for display in legends, replacing 'Fixed task' with 'Shifted task'."""
     if task_name.startswith("Fixed task"):
-        return task_name.replace("Fixed task", "Shifted task")
-    return task_name
+        task_name = task_name.replace("Fixed task", "Shifted task")
+    splitted_metric = metric_name.split(" | ")
+    name = f"{task_name} ({splitted_metric[0]})"
+    return name
 
 
 def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
@@ -76,7 +78,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             
             for task_name, metrics in eval_metrics.items():
                 for metric_name, values in metrics.items():
-                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
+                    if f" | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
                         # Get MSE by position for this step
                         mse_by_position = normalize_error_values(values[step_idx])  # List of MSE values by position
                         n_points = len(mse_by_position)
@@ -87,7 +89,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 linewidth=2,
                                 marker='o',
                                 markersize=6,
-                                label=f"{format_task_name_for_display(task_name)}")
+                                label=f"{format_task_name_for_display(task_name, metric_name)}")
                         color_idx += 1
             
             plt.xlabel("Context Length (Position)")
@@ -120,7 +122,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 linewidth=2,
                                 marker='o',
                                 markersize=6,
-                                label=f"{format_task_name_for_display(task_name)}")
+                                label=f"{format_task_name_for_display(task_name, metric_name)}")
                         color_idx += 1
             
             plt.xlabel("Context Length (Position)")

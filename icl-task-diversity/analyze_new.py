@@ -89,13 +89,13 @@ def parse_multirun_args(multirun_arg, run_id_arg):
     """Parse multirun arguments to extract custom names and multirun ID."""
     if multirun_arg is True:
         # No custom names, just use most recent multirun
-        return None, None
+        return None, run_id
     elif multirun_arg and "," in multirun_arg:
         # Custom names provided, run_id should be the multirun_id
         custom_names = [name.strip() for name in multirun_arg.split(',')]
         return run_id_arg, custom_names
     else:
-        return None, None
+        return None, run_id
 
 
 def main():

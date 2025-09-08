@@ -84,4 +84,5 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      training.lr: 1e-3, 1e-4
+      training.lr: 1e-4
+      distrib_name: inf, 3.0, 5.0

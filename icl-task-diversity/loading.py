@@ -9,6 +9,7 @@ from functools import lru_cache
 import concurrent.futures
 import multiprocessing
 from safetensors.numpy import load_file
+from typing import Optional, Tuple
 
 # Global configuration for parallel processing
 MAX_NUM_CPUS = min(8, multiprocessing.cpu_count())
@@ -64,17 +65,9 @@ def load_log(run_id: str) -> dict:
     with open(log_path, "r") as f:
         return json.load(f)
 
-
+"""
 @lru_cache(maxsize=1024)
 def parse_tensor_key(tensor_key: str) -> tuple:
-    """Parse tensor key with caching for performance.
-    
-    Args:
-        tensor_key: String like "Fixed_task_2_0_Transformer_vs_Ridge_MSE"
-    
-    Returns:
-        tuple: (task_name, baseline_name, metric_key, log_key) or None if invalid
-    """
     # Find metric type (MSE or RelErr)
     if tensor_key.endswith('_MSE'):
         metric_type = 'MSE'
@@ -85,47 +78,174 @@ def parse_tensor_key(tensor_key: str) -> tuple:
     else:
         return None
     
-    # Split by '_Transformer_vs_' to separate task from baseline
-    if '_Transformer_vs_' not in base_key:
-        return None
+    # Check for transformer vs baseline pattern first
+    if '_Transformer_vs_' in base_key:
+        task_part, baseline_part = base_key.split('_Transformer_vs_', 1)
+        
+        # Optimize string replacements - avoid regex
+        task_name = task_part.replace('_', ' ')
+        # Handle decimal numbers in task names (e.g., "2_0" -> "2.0")
+        if ' ' in task_name:
+            parts = task_name.split(' ')
+            for i in range(len(parts) - 1):
+                if parts[i].isdigit() and parts[i + 1].isdigit():
+                    parts[i] = parts[i] + '.' + parts[i + 1]
+                    parts.pop(i + 1)
+                    break
+            task_name = ' '.join(parts)
+        
+        baseline_name = baseline_part.replace('_', ' ')
+        # Handle decimal numbers in baseline names
+        if ' ' in baseline_name:
+            parts = baseline_name.split(' ')
+            for i in range(len(parts) - 1):
+                if parts[i].isdigit() and parts[i + 1].isdigit():
+                    parts[i] = parts[i] + '.' + parts[i + 1]
+                    parts.pop(i + 1)
+                    break
+            baseline_name = ' '.join(parts)
+        
+        # Handle special cases
+        if task_name.startswith('Test tasks'):
+            task_name = 'Test tasks'
+        
+        # Build log key and metric key for transformer comparisons
+        log_key = f"eval/{task_name}"
+        if metric_type == 'RelErr':
+            metric_key = f"Transformer | {baseline_name} (RelErr)"
+        else:
+            metric_key = f"Transformer | {baseline_name}"
+        
+        return task_name, baseline_name, metric_key, log_key
     
-    task_part, baseline_part = base_key.split('_Transformer_vs_', 1)
+    # Check for baseline vs baseline pattern: {task}_{baseline1}_vs_{baseline2}_{metric}
+    elif '_vs_' in base_key:
+        # Find the last '_vs_' to split baseline1 from baseline2
+        vs_pos = base_key.rfind('_vs_')
+        if vs_pos == -1:
+            return None
+            
+        # Split into task_baseline1 and baseline2
+        task_baseline1_part = base_key[:vs_pos]
+        baseline2_part = base_key[vs_pos + 4:]  # Skip '_vs_'
+        
+        # Convert underscores to spaces
+        task_baseline1_name = task_baseline1_part.replace('_', ' ')
+        baseline2_name = baseline2_part.replace('_', ' ')
+        
+        # Handle decimal numbers
+        def fix_decimals(name):
+            if ' ' in name:
+                parts = name.split(' ')
+                for i in range(len(parts) - 1):
+                    if parts[i].isdigit() and parts[i + 1].isdigit():
+                        parts[i] = parts[i] + '.' + parts[i + 1]
+                        parts.pop(i + 1)
+                        break
+                return ' '.join(parts)
+            return name
+        
+        task_baseline1_name = fix_decimals(task_baseline1_name)
+        baseline2_name = fix_decimals(baseline2_name)
+        
+        # Handle special cases for task names
+        if task_baseline1_name.startswith('Test tasks'):
+            # Extract original task name and baseline1 from combined name
+            parts = task_baseline1_name.split(' ')
+            if len(parts) >= 3:  # "Test tasks SomeBaseline"
+                task_name = 'Test tasks'
+                baseline1_name = ' '.join(parts[2:])  # Everything after "Test tasks"
+                combined_task_name = f"Test tasks {baseline1_name}"
+            else:
+                combined_task_name = task_baseline1_name
+        else:
+            combined_task_name = task_baseline1_name
+        
+        # Build log key and metric key for baseline comparisons
+        # Use combined task name as the synthetic task
+        log_key = f"eval/{combined_task_name}"
+        if metric_type == 'RelErr':
+            metric_key = f"{baseline2_name} | True (RelErr)"
+        else:
+            metric_key = f"{baseline2_name} | True"
+        
+        return combined_task_name, baseline2_name, metric_key, log_key
     
-    # Optimize string replacements - avoid regex
-    task_name = task_part.replace('_', ' ')
-    # Handle decimal numbers in task names (e.g., "2_0" -> "2.0")
-    if ' ' in task_name:
-        parts = task_name.split(' ')
-        for i in range(len(parts) - 1):
-            if parts[i].isdigit() and parts[i + 1].isdigit():
-                parts[i] = parts[i] + '.' + parts[i + 1]
-                parts.pop(i + 1)
-                break
-        task_name = ' '.join(parts)
-    
-    baseline_name = baseline_part.replace('_', ' ')
-    # Handle decimal numbers in baseline names
-    if ' ' in baseline_name:
-        parts = baseline_name.split(' ')
-        for i in range(len(parts) - 1):
-            if parts[i].isdigit() and parts[i + 1].isdigit():
-                parts[i] = parts[i] + '.' + parts[i + 1]
-                parts.pop(i + 1)
-                break
-        baseline_name = ' '.join(parts)
-    
-    # Handle special cases
-    if task_name.startswith('Test tasks'):
-        task_name = 'Test tasks'
-    
-    # Build log key and metric key
-    log_key = f"eval/{task_name}"
-    if metric_type == 'RelErr':
-        metric_key = f"Transformer | {baseline_name} (RelErr)"
+    # If neither pattern matches, return None
+    return None
+"""
+
+@lru_cache(maxsize=1024)
+def parse_tensor_key(tensor_key: str) -> Optional[Tuple[str, str, str, str]]:
+    """
+    Parse keys of the form:
+        {task}_{baseline1}_vs_{baseline2}_{metric}
+    with {metric} in {"MSE","RelErr"}.
+
+    Returns:
+        (task_name, baseline2_name, metric_key, log_key) or None if invalid.
+
+    Conventions:
+      - baseline2_name is always the returned baseline.
+      - metric_key is always "{baseline1} | {baseline2}" (+ " (RelErr)" if needed).
+      - log_key = "eval/{task_name}".
+    """
+    # metric
+    if tensor_key.endswith("_MSE"):
+        metric_type = "MSE"
+        base_key = tensor_key[:-4]
+    elif tensor_key.endswith("_RelErr"):
+        metric_type = "RelErr"
+        base_key = tensor_key[:-7]
     else:
-        metric_key = f"Transformer | {baseline_name}"
-    
-    return task_name, baseline_name, metric_key, log_key
+        return None
+
+    def with_metric_suffix(s: str) -> str:
+        return s + (" (RelErr)" if metric_type == "RelErr" else "")
+
+    def clean_task(name: str) -> str:
+        # underscores → spaces, join consecutive integers "a b" → "a.b"
+        name = name.replace("_", " ")
+        parts = name.split()
+        i = 0
+        while i + 1 < len(parts):
+            if parts[i].isdigit() and parts[i + 1].isdigit():
+                parts[i] = parts[i] + "." + parts[i + 1]
+                parts.pop(i + 1)
+            else:
+                i += 1
+        s = " ".join(parts)
+        if s.startswith("Test tasks"):
+            s = "Test tasks"
+        return s
+
+    # expect "..._vs_..."
+    vs_pos = base_key.rfind("_vs_")
+    if vs_pos == -1:
+        return None
+
+    left = base_key[:vs_pos]              # "{task}_{baseline1}"
+    baseline2_raw = base_key[vs_pos+4:]   # "{baseline2}"
+
+    # split left into task and baseline1 using the last underscore
+    last_us = left.rfind("_")
+    if last_us == -1:
+        return None
+
+    task_raw = left[:last_us]
+    baseline1_raw = left[last_us+1:]
+
+    task_name = clean_task(task_raw)
+    baseline1_name = baseline1_raw.replace("_", " ")
+    baseline2_name = baseline2_raw.replace("_", " ")
+
+    if not task_name or not baseline1_name or not baseline2_name:
+        return None
+
+    metric_key = with_metric_suffix(f"{baseline1_name} | {baseline2_name}")
+    log_key = f"eval/{task_name}"
+
+    return task_name, baseline2_name, metric_key, log_key
 
 
 def filter_load_file(file_path):
@@ -299,6 +419,34 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                     if filtered_values:
                         log[log_key][metric_key] = filtered_values
                     
+            # Load baseline comparisons if available
+            baseline_file = eval_results_dir / "baseline_eval_step.safetensors"
+            if baseline_file.exists():
+                try:
+                    print(f"Loading baseline comparisons from {baseline_file.name}...")
+                    baseline_tensors = filter_load_file(baseline_file)
+                    
+                    # Get number of evaluation steps to duplicate baseline data
+                    num_eval_steps = len(eval_steps) if eval_steps else len(safetensor_files)
+                    
+                    for tensor_key, tensor_data in baseline_tensors.items():
+                        parsed = parse_tensor_key(tensor_key)
+                        if parsed:
+                            task_name, baseline_name, metric_key, log_key = parsed
+                            
+                            # Create log structure if it doesn't exist
+                            if log_key not in log:
+                                log[log_key] = {}
+                            
+                            # Duplicate baseline data across all evaluation steps
+                            duplicated_data = [tensor_data.tolist()] * num_eval_steps
+                            log[log_key][metric_key] = duplicated_data
+                            
+                    print(f"Successfully integrated baseline comparisons")
+                    
+                except Exception as e:
+                    print(f"Warning: Could not load baseline comparisons: {e}")
+            
             total_time = time.time() - start_time
             print(f"Successfully loaded evaluation data from safetensors in {total_time:.2f}s total")
             return log
