@@ -62,8 +62,9 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
         icl_rel_err_dir.mkdir(exist_ok=True)
         
         # Colors for different tasks
-        n_curves = sum(len(metrics) for metrics in eval_metrics.values())
+        n_curves = len(eval_metrics)
         colors = cm.get_cmap('tab20', n_curves)  # or 'tab10', 'Set3', 'hsv', etc.
+        linestyles = ['-', '--', '-.', ':']
         
         # Generate plots for each evaluation step
         for step_idx, eval_step in enumerate(eval_steps):
@@ -73,6 +74,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             color_idx = 0
             
             for task_name, metrics in eval_metrics.items():
+                linestyle_idx = 0
                 for metric_name, values in metrics.items():
                     if f" | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values and step_idx < len(values):
                         # Get MSE by position for this step
@@ -83,10 +85,12 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                         plt.plot(positions, mse_by_position,
                                 color=colors(color_idx),
                                 linewidth=2,
-                                marker='o',
-                                markersize=6,
+                                #marker='.,
+                                #markersize=1,
+                                linestyle=linestyles[linestyle_idx % len(linestyles)],
                                 label=f"{format_task_name_for_display(task_name, metric_name)}")
-                        color_idx += 1
+                        linestyle_idx += 1
+                color_idx += 1
             
             plt.xlabel("Context Length (Position)")
             plt.ylabel(f"MSE (Transformer vs {baseline_type})")
