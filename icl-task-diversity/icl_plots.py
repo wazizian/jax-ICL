@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import matplotlib.pyplot as plt
-imort matplotlib.cm as cm
+import matplotlib.cm as cm
 import numpy as np
 
 from loading import load_log_with_safetensors
