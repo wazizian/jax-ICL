@@ -8,7 +8,7 @@ from pathlib import Path
 from scipy.optimize import curve_fit
 
 from task_shift import normalize_error_values, icl_power_law
-from weight_analysis import format_task_name_for_display
+from icl_plots import format_task_name_for_display
 
 
 def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
@@ -52,7 +52,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
                 axes[1].plot(eval_steps, mean_values, 
                         color=colors[color_idx_mse % len(colors)], 
                         linewidth=2,
-                        label=f"{format_task_name_for_display(task_name)}: {metric_name}")
+                        label=f"{format_task_name_for_display(task_name, metric_name)}: {metric_name}")
                 color_idx_mse += 1
     
     # Plot min MSE over context length as function of training step
@@ -64,7 +64,7 @@ def plot_training_loss(log: dict, run_id: str, output_dir: Path = None):
                 axes[2].plot(eval_steps, min_values, 
                         color=colors[color_idx_rel % len(colors)], 
                         linewidth=2,
-                        label=f"{format_task_name_for_display(task_name)}: {metric_name}")
+                        label=f"{format_task_name_for_display(task_name, metric_name)}: {metric_name}")
                 color_idx_rel += 1
     
     # Configure MSE plot (axes[1])

@@ -13,7 +13,8 @@ from pathlib import Path
 from loading import get_most_recent_run, get_most_recent_multirun, load_log_with_safetensors
 from task_shift import plot_task_shift_analysis
 from mean_min_best_mse import plot_min_mse_analysis
-from weight_analysis import plot_weights_analysis, plot_weights_analysis_multirun, plot_icl_for_all_steps
+from weight_analysis import plot_weights_analysis, plot_weights_analysis_multirun
+from icl_plots import plot_icl_for_all_steps
 from training_analysis import plot_training_loss, fit_mse_curves_and_compute_metrics, print_summary
 from hyperparam_analysis import hyperparam_analysis
 
