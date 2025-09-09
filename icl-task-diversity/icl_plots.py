@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import matplotlib.pyplot as plt
+imort matplotlib.cm as cm
 import numpy as np
 
 from loading import load_log_with_safetensors
@@ -61,7 +62,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
         icl_rel_err_dir.mkdir(exist_ok=True)
         
         # Colors for different tasks
-        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan', 'magenta']
+        n_curves = sum(len(metrics) for metrics in eval_metrics.values())
+        colors = cm.get_cmap('tab20', n_curves)  # or 'tab10', 'Set3', 'hsv', etc.
         
         # Generate plots for each evaluation step
         for step_idx, eval_step in enumerate(eval_steps):
@@ -79,7 +81,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                         positions = list(range(1, n_points + 1))  # Context length positions
                         
                         plt.plot(positions, mse_by_position,
-                                color=colors[color_idx % len(colors)],
+                                color=colors(color_idx),
                                 linewidth=2,
                                 marker='o',
                                 markersize=6,
@@ -112,7 +114,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                         positions = list(range(1, n_points + 1))  # Context length positions
                         
                         plt.plot(positions, rel_err_by_position,
-                                color=colors[color_idx % len(colors)],
+                                color=colors(color_idx),
                                 linewidth=2,
                                 marker='o',
                                 markersize=6,
