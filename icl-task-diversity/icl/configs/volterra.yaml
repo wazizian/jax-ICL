@@ -75,6 +75,8 @@ eval:
     - 0.1
     - 0.2
     - 0.3
+    - 0.4
+    - 0.5
 
 # Hydra settings
 hydra:
@@ -86,5 +88,5 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      training.lr: 1e-4
-      task.distrib_param: inf #, 3.0, 5.0
+      training.lr: 1e-4, 2e-4, 1e-3
+      task.kernel_exponent: 1., 1.5, 2.0
