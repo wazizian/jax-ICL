@@ -1607,6 +1607,697 @@ tree_util.register_pytree_node(MLPSDETask,
                                MLPSDETask._tree_unflatten)
 
 
+@dataclasses.dataclass
+class VolterraTask:
+    """
+    X_t = sum_{s < t} G(t-s) (b(X_s) + sigma Z_s)
+    where Z_s truncated normal noise, and
+    where b(X_t) is a small MLP instead of linear function.
+    """
+    n_tasks: int
+    n_data: int
+    n_dims: int
+    n_points: int
+    batch_size: int
+    data_seed: int
+    task_seed: int
+    noise_seed: int
+    data_scale: float
+    task_scale: float
+    noise_scale: float
+    dtype: Any
+    task_center: float | None = None
+    n_max_points: int | None = None  # Optional, used for padding in some models
+    clip: float | None = None  # Optional, clip task vectors to [-clip, clip]^d
+    name: str | None = None  # Optional, can be set to override default name
+    eval_ridge: bool = True  # Optional, whether to include Ridge baseline in evaluation
+    use_weights: bool = False  # Optional, whether to use task importance weights
+    use_weight_sampling: bool = False  # Whether to use weighted sampling for tasks
+    distrib_name: str = "normal"  # Distribution name: "normal" or "student"
+    distrib_param: float | None = None  # Distribution parameter (degrees of freedom for student-t)
+    use_curriculum: bool = False  # Whether to use curriculum learning
+    curriculum_n_points_increment: int = 2  # Increment for curriculum learning
+    curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
+    ou_step: float = 1e-2
+    hidden_size: int | None = None  # MLP hidden size, defaults to 2*n_dims
+    task_n_dims: int | None = None  # Automatically computed based on MLP parameters
+    data_noise_trunc_radius: float = 10  # Truncation radius Gaussian noise for Volterra SDE
+    kernel_exponent: float = 1.
+
+    
+    # Extended curriculum learning parameters - use defaults that match base parameters
+    max_hidden_size: int = 0  # Maximum MLP hidden size (will be set to hidden_size if 0)
+    curriculum_hidden_increment: int = 1  # How much to increase hidden size each step
+    min_hidden_size: int = 1  # Starting hidden size for curriculum
+    max_n_dims: int = 0  # Maximum state dimensionality (will be set to n_dims if 0)
+    curriculum_dims_increment: int = 1  # How much to increase dimensions each step
+    min_n_dims: int = 1  # Starting dimensions for curriculum
+    current_hidden_size: int | None = None
+    current_n_dims: int | None = None
+    
+    _skip_init: bool = False  # Private parameter to skip __post_init__ logic
+
+    def __post_init__(self):
+        if self._skip_init:
+            return
+        # Validation
+        self.data_key = jax.random.PRNGKey(self.data_seed)
+        self.task_key = jax.random.PRNGKey(self.task_seed)
+        self.noise_key = jax.random.PRNGKey(self.noise_seed)
+        
+        # Set hidden size if not provided
+        if self.hidden_size is None:
+            self.hidden_size = 2 * self.n_dims
+            
+        # Set up extended curriculum parameters
+        self.max_hidden_size = self.hidden_size if self.max_hidden_size == 0 else self.max_hidden_size
+        self.max_n_dims = self.n_dims if self.max_n_dims == 0 else self.max_n_dims
+        
+        # Initialize current curriculum state
+        self.current_hidden_size = self.min_hidden_size if self.use_curriculum else self.max_hidden_size
+        self.current_n_dims = self.min_n_dims if self.use_curriculum else self.max_n_dims
+        
+        # **CRITICAL CHANGE**: Compute task_n_dims based on MAX MLP parameters for shape consistency
+        # MLP has: W1 (max_n_dims x max_hidden_size), b1 (max_hidden_size), W2 (max_hidden_size x max_n_dims), b2 (max_n_dims)
+        self.task_n_dims = self.max_n_dims * self.max_hidden_size + self.max_hidden_size + self.max_hidden_size * self.max_n_dims + self.max_n_dims
+        
+        self.n_max_points = self.n_points if self.n_max_points is None else self.n_max_points
+        self.n_points = self.n_max_points if not self.use_curriculum else self.n_points
+        self.task_center = 0.0 if self.task_center is None else self.task_center
+        task_pool, weights = self.generate_task_pool() if self.n_tasks > 0 else (None, None)
+        self.task_pool = task_pool
+        self.weights = weights
+        self.data_pool = None
+        self.name = f"Volterra({self.n_tasks})" if self.name is None else self.name
+
+    @classmethod
+    def from_task_pool(cls, task_pool: Array, weights: Array, **kwargs):
+        assert kwargs["n_tasks"] == task_pool.shape[0]
+        task = cls(**kwargs)
+        task.task_pool = task_pool
+        task.weights = weights
+        return task
+    
+    def get_params_from_tasks(self, tasks: Array) -> dict:
+        """
+        **CRITICAL CHANGE**: Extract MLP parameters instead of mu/theta.
+        
+        Args:
+            tasks: Task parameters of shape (batch_size, task_n_dims, 1)
+        
+        Returns:
+            dict with MLP parameters: {'W1', 'b1', 'W2', 'b2'}
+        """
+        batch_size_actual, task_n_dims_actual, one_dim = tasks.shape
+        chex.assert_shape(tasks, (batch_size_actual, task_n_dims_actual, one_dim))
+        chex.assert_equal(task_n_dims_actual, self.task_n_dims)
+        chex.assert_equal(one_dim, 1)
+        
+        # Flatten task parameters
+        params = tasks[:, :, 0]  # Shape: (batch_size, task_n_dims)
+        chex.assert_shape(params, (batch_size_actual, self.task_n_dims))
+        
+        # Extract MLP parameters using MAX dimensions for shape consistency
+        idx = 0
+        
+        # W1: (batch_size, max_n_dims, max_hidden_size)
+        W1_size = self.max_n_dims * self.max_hidden_size
+        W1 = params[:, idx:idx+W1_size].reshape(batch_size_actual, self.max_n_dims, self.max_hidden_size)
+        idx += W1_size
+        chex.assert_shape(W1, (batch_size_actual, self.max_n_dims, self.max_hidden_size))
+        
+        # b1: (batch_size, max_hidden_size)  
+        b1 = params[:, idx:idx+self.max_hidden_size]
+        idx += self.max_hidden_size
+        chex.assert_shape(b1, (batch_size_actual, self.max_hidden_size))
+        
+        # W2: (batch_size, max_hidden_size, max_n_dims)
+        W2_size = self.max_hidden_size * self.max_n_dims
+        W2 = params[:, idx:idx+W2_size].reshape(batch_size_actual, self.max_hidden_size, self.max_n_dims)
+        idx += W2_size
+        chex.assert_shape(W2, (batch_size_actual, self.max_hidden_size, self.max_n_dims))
+        
+        # b2: (batch_size, max_n_dims)
+        b2 = params[:, idx:idx+self.max_n_dims]
+        chex.assert_shape(b2, (batch_size_actual, self.max_n_dims))
+        
+        # Verify we consumed all parameters
+        chex.assert_equal(idx + self.max_n_dims, self.task_n_dims)
+        
+        return {'W1': W1, 'b1': b1, 'W2': W2, 'b2': b2}
+
+    def apply_mlp_drift(self, x: Array, mlp_params: dict) -> Array:
+        """
+        **CRITICAL CHANGE**: Apply MLP drift function b(x) with curriculum masking.
+        
+        Args:
+            x: State of shape (batch_size, n_points, current_n_dims) - ALWAYS has n_points dimension
+            mlp_params: Dictionary with MLP parameters (using max dimensions)
+        
+        Returns:
+            drift: Drift vector of same shape as x
+        """
+        batch_size_actual, n_points_actual, n_dims_actual = x.shape
+        chex.assert_shape(x, (batch_size_actual, n_points_actual, n_dims_actual))
+        assert n_dims_actual <= self.max_n_dims, f"Input n_dims {n_dims_actual} exceeds max_n_dims {self.max_n_dims}"
+        
+        # MLP parameters should match batch size and MAX dimensions
+        chex.assert_shape(mlp_params['W1'], (batch_size_actual, self.max_n_dims, self.max_hidden_size))
+        chex.assert_shape(mlp_params['b1'], (batch_size_actual, self.max_hidden_size))
+        chex.assert_shape(mlp_params['W2'], (batch_size_actual, self.max_hidden_size, self.max_n_dims))
+        chex.assert_shape(mlp_params['b2'], (batch_size_actual, self.max_n_dims))
+        
+        def single_point_mlp_with_masking(x_point, W1, b1, W2, b2):
+            """Apply MLP to a single point with curriculum masking."""
+            chex.assert_shape(x_point, (n_dims_actual,))
+            chex.assert_shape(W1, (self.max_n_dims, self.max_hidden_size))
+            chex.assert_shape(b1, (self.max_hidden_size,))
+            chex.assert_shape(W2, (self.max_hidden_size, self.max_n_dims))
+            chex.assert_shape(b2, (self.max_n_dims,))
+            
+            # Pad input to max dimensions (zero-pad extra dimensions)
+            x_padded = jnp.concatenate([x_point, jnp.zeros(self.max_n_dims - n_dims_actual, dtype=x_point.dtype)])
+            chex.assert_shape(x_padded, (self.max_n_dims,))
+            
+            # Forward pass: x -> h -> drift with masking
+            h_full = jax.nn.tanh(x_padded @ W1 + b1)  # (max_hidden_size,)
+            chex.assert_shape(h_full, (self.max_hidden_size,))
+            
+            # Apply hidden dimension mask
+            hidden_mask = jnp.concatenate([
+                jnp.ones(self.current_hidden_size, dtype=h_full.dtype),
+                jnp.zeros(self.max_hidden_size - self.current_hidden_size, dtype=h_full.dtype)
+            ])
+            h_masked = h_full * hidden_mask
+            chex.assert_shape(h_masked, (self.max_hidden_size,))
+            
+            # Second layer
+            drift_full = h_masked @ W2 + b2  # (max_n_dims,)
+            chex.assert_shape(drift_full, (self.max_n_dims,))
+
+            # Normalize drift to prevent explosion
+            drift_full = jnp.clip(drift_full, -1.0, 1.0)  # Clip to prevent extreme drift values
+            drift_full = drift_full + 0.1 * x_padded  # Add small linear term for stability
+            
+            # Apply output dimension mask and truncate to current dimensions
+            drift_current = drift_full[:n_dims_actual]  # (n_dims_actual,)
+            chex.assert_shape(drift_current, (n_dims_actual,))
+            
+            return drift_current
+        
+        # Use vmap to handle n_points dimension: vmap over both points and batch
+        # First vmap over n_points, then over batch
+        batched_mlp = jax.vmap(jax.vmap(single_point_mlp_with_masking, in_axes=(0, None, None, None, None)), 
+                              in_axes=(0, 0, 0, 0, 0))
+        
+        drift = batched_mlp(x, mlp_params['W1'], mlp_params['b1'], mlp_params['W2'], mlp_params['b2'])
+        
+        chex.assert_shape(drift, (batch_size_actual, n_points_actual, n_dims_actual))
+        return drift
+
+    def generate_task_pool(self) -> Array:
+        chex.assert_scalar_positive(self.n_tasks)  # Should be positive since we're generating a pool
+        
+        key = jax.random.fold_in(self.task_key, 0)
+        shape = self.n_tasks, self.task_n_dims, 1
+        tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
+                              self.distrib_name, self.distrib_param, shape, self.dtype)
+
+        # Assert generated task pool shape
+        chex.assert_shape(tasks, (self.n_tasks, self.task_n_dims, 1))
+
+        log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                     self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+        weights = log_weights
+        
+        # Assert weights shape
+        chex.assert_shape(weights, (self.n_tasks, 1))
+        
+        return tasks, weights
+
+    def generate_data_pool(self) -> Array:
+        chex.assert_scalar_positive(self.n_data)  # Should be positive since we're generating a pool
+        
+        key = jax.random.fold_in(self.data_key, 0)
+        shape = self.n_data, self.n_points, self.n_dims
+        data = jax.random.normal(key, shape, self.dtype) * self.data_scale
+        
+        # Assert generated data pool shape
+        chex.assert_shape(data, (self.n_data, self.n_points, self.n_dims))
+        
+        return data
+
+    @jax.jit
+    def sample_data(self, step: int) -> Array:
+        key = jax.random.fold_in(self.data_key, step)
+        if self.n_data > 0:
+            idxs = jax.random.choice(key, self.n_data, (self.batch_size,))
+            chex.assert_shape(idxs, (self.batch_size,))
+            data = self.data_pool[idxs]
+            # data_pool has shape (n_data, n_points, n_dims), so indexed data should be:
+            chex.assert_shape(data, (self.batch_size, self.n_points, self.n_dims))
+        else:
+            shape = self.batch_size, self.n_points, self.n_dims
+            data = jax.random.normal(key, shape, self.dtype) * self.data_scale + self.task_center
+            chex.assert_shape(data, (self.batch_size, self.n_points, self.n_dims))
+        
+        # Final assertion on returned data
+        batch_size_actual, n_points_actual, n_dims_actual = data.shape
+        chex.assert_shape(data, (batch_size_actual, n_points_actual, n_dims_actual))
+        chex.assert_equal(batch_size_actual, self.batch_size)
+        chex.assert_equal(n_points_actual, self.n_points) 
+        chex.assert_equal(n_dims_actual, self.n_dims)
+        
+        return data
+
+    @jax.jit
+    def sample_tasks(self, step: int) -> Array:
+        key = jax.random.fold_in(self.task_key, step)
+        if self.n_tasks > 0:
+            if self.use_weight_sampling:
+                idxs = jax.random.categorical(key, self.weights, axis=0, shape=(self.batch_size,))
+                chex.assert_shape(idxs, (self.batch_size,))
+                log_weights = jnp.zeros((self.batch_size, 1), self.dtype)
+                chex.assert_shape(log_weights, (self.batch_size, 1))
+                tasks = self.task_pool[idxs]
+                # task_pool has shape (n_tasks, task_n_dims, 1), so indexed tasks should be:
+                chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
+            else:
+                idxs = jax.random.choice(key, self.n_tasks, (self.batch_size,))
+                chex.assert_shape(idxs, (self.batch_size,))
+                tasks = self.task_pool[idxs]
+                chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
+                log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                             self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+                chex.assert_shape(log_weights, (self.batch_size, 1))
+        else:
+            shape = self.batch_size, self.task_n_dims, 1
+            tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
+                                 self.distrib_name, self.distrib_param, shape, self.dtype)
+            chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
+            log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
+                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+            chex.assert_shape(log_weights, (self.batch_size, 1))
+        
+        weights = log_weights
+        
+        # Final assertions on returned values  
+        batch_size_actual, task_n_dims_actual, one_dim = tasks.shape
+        chex.assert_shape(tasks, (batch_size_actual, task_n_dims_actual, one_dim))
+        chex.assert_equal(batch_size_actual, self.batch_size)
+        chex.assert_equal(task_n_dims_actual, self.task_n_dims)
+        chex.assert_equal(one_dim, 1)
+        
+        batch_size_w, one_dim_w = weights.shape
+        chex.assert_shape(weights, (batch_size_w, one_dim_w))
+        chex.assert_equal(batch_size_w, self.batch_size)
+        chex.assert_equal(one_dim_w, 1)
+        
+        return tasks, weights
+
+    @jax.jit
+    def evaluate(self, tasks: Array, step: int) -> Array:
+        """
+        **CRITICAL CHANGE**: Use MLP drift instead of linear OU drift.
+        """
+        batch_size_actual, task_n_dims_actual, one_dim = tasks.shape
+        chex.assert_shape(tasks, (batch_size_actual, task_n_dims_actual, one_dim))
+        chex.assert_equal(batch_size_actual, self.batch_size)
+        chex.assert_equal(task_n_dims_actual, self.task_n_dims)
+        chex.assert_equal(one_dim, 1)
+
+        # Extract MLP parameters instead of mu/theta
+        mlp_params = self.get_params_from_tasks(tasks)
+
+        key = jax.random.fold_in(self.noise_key, step)
+        # Generate noise using CURRENT dimensions (curriculum masking)
+        all_noise = jax.random.truncated_normal(
+                key,
+                -self.data_noise_trunc_radius / self.noise_scale,
+                self.data_noise_trunc_radius / self.noise_scale,
+                shape = (self.n_points+1, self.batch_size, self.current_n_dims),
+                dtype = self.dtype
+                ) * self.noise_scale
+        chex.assert_shape(all_noise, (self.n_points+1, self.batch_size, self.current_n_dims))
+
+        init = all_noise[0, :, :]
+        chex.assert_shape(init, (self.batch_size, self.current_n_dims))
+
+        all_noise = all_noise[1:, :, :]
+        chex.assert_shape(all_noise, (self.n_points, self.batch_size, self.current_n_dims))
+
+        indices = jnp.arange(self.n_points+1)
+
+        def compute_change(state, noise):
+            """
+            Compute b(X_t) dt + sigma sqrt(dt) Z_t
+            """
+            chex.assert_shape(state, (self.batch_size, self.current_n_dims))
+            chex.assert_shape(noise, (self.batch_size, self.current_n_dims))
+
+            state_3d = state[:, None, :]  # (batch_size, 1, current_n_dims)
+            chex.assert_shape(state_3d, (self.batch_size, 1, self.current_n_dims))
+
+            drift_3d = self.apply_mlp_drift(state_3d, mlp_params)
+            chex.assert_shape(drift_3d, (self.batch_size, 1, self.current_n_dims))
+
+            drift = drift_3d[:, 0, :]  # (batch_size, current_n_dims)
+            chex.assert_shape(drift, (self.batch_size, self.current_n_dims))
+
+            change = -drift * self.ou_step + jnp.sqrt(self.ou_step) * noise
+            chex.assert_shape(change, (self.batch_size, self.current_n_dims))
+
+            return change
+
+        def mlp_sde_step(carry, t):
+            """
+            Compute X_(t+1) = sum_{s <= t} G(t-s) (b(X_s) dt + sigma sqrt(dt) Z_s)
+            where all_changes[s] = b(X_s) dt + sigma sqrt(dt) Z_s
+            Returns X_(t+1) and updates all_changes.
+            """
+            all_changes = carry
+            chex.assert_shape(all_changes, (self.n_points+1, self.batch_size, self.current_n_dims))
+
+            g_coefs = jax.lax.select(indices <= t, (t - indices + 1) ** (-self.kernel_exponent), indices * 0.0)
+            chex.assert_shape(g_coefs, (self.n_points+1,))
+
+            new_state = jnp.einsum('s,sbd->bd', g_coefs, all_changes)
+            chex.assert_shape(new_state, (self.batch_size, self.current_n_dims))
+
+            noise = all_changes[t+1, :, :]  # (batch_size, current_n_dims)
+            chex.assert_shape(noise, (self.batch_size, self.current_n_dims))
+
+            new_change = compute_change(new_state, noise)
+            chex.assert_shape(new_change, (self.batch_size, self.current_n_dims))
+
+            new_all_changes = all_changes.at[t+1, :, :].set(new_change)
+
+            return new_all_changes, new_state
+            
+        # Run the MLP SDE for n_points steps
+        all_changes_init =  jnp.zeros((self.n_points+1, self.batch_size, self.current_n_dims), dtype=self.dtype)
+        # Note all_changes_init[self.n_points, :, :] is unused
+        all_changes_init = all_changes_init.at[1:self.n_points, :, :].set(all_noise[1:, :, :])
+
+        init_change = compute_change(init, all_changes_init[0, :, :])
+        chex.assert_shape(init_change, (self.batch_size, self.current_n_dims))
+
+        all_changes_init = all_changes_init.at[0, :, :].set(init_change)
+
+        _, sde_steps = jax.lax.scan(mlp_sde_step, all_changes_init, indices[:-1])
+        chex.assert_shape(sde_steps, (self.n_points, self.batch_size, self.current_n_dims))
+
+        sde_steps = jnp.transpose(sde_steps, (1, 0, 2))  # Shape: (batch_size, n_points, current_n_dims)
+        chex.assert_shape(sde_steps, (self.batch_size, self.n_points, self.current_n_dims))
+
+        # Final assertions on return values using current curriculum dimensions
+        init_bs, init_dims = init.shape
+        chex.assert_shape(init, (init_bs, init_dims))
+        chex.assert_equal(init_bs, self.batch_size)
+        chex.assert_equal(init_dims, self.current_n_dims)
+        
+        sde_bs, sde_points, sde_dims = sde_steps.shape
+        chex.assert_shape(sde_steps, (sde_bs, sde_points, sde_dims))
+        chex.assert_equal(sde_bs, self.batch_size)
+        chex.assert_equal(sde_points, self.n_points)
+        chex.assert_equal(sde_dims, self.current_n_dims)
+
+        new_init = jnp.concatenate([init, jnp.zeros((self.batch_size, self.max_n_dims - self.current_n_dims), dtype=init.dtype)], axis=1)
+        chex.assert_shape(new_init, (self.batch_size, self.max_n_dims))
+
+        new_sde_steps = jnp.concatenate([sde_steps, jnp.zeros((self.batch_size, self.n_points, self.max_n_dims - self.current_n_dims), dtype=sde_steps.dtype)], axis=2)
+        chex.assert_shape(new_sde_steps, (self.batch_size, self.n_points, self.max_n_dims))
+
+        return new_init, new_sde_steps
+
+    @jax.jit
+    def generate_attention_mask(self) -> Array:
+        """Generate causal attention mask for the sequence with right padding."""
+        effective_seq_len = self.n_points      # Valid data: positions 0 to this-1
+        max_seq_len = self.n_max_points        # Total padded length
+        
+        chex.assert_scalar_non_negative(effective_seq_len)
+        chex.assert_scalar_positive(max_seq_len)
+        assert effective_seq_len <= max_seq_len, f"effective_seq_len {effective_seq_len} > max_seq_len {max_seq_len}"
+        
+        # Start with all positions masked (False)
+        mask = jnp.zeros((max_seq_len, max_seq_len), dtype=bool)
+        chex.assert_shape(mask, (max_seq_len, max_seq_len))
+        
+        # Valid region gets causal attention pattern
+        valid_mask = jnp.tril(jnp.ones((effective_seq_len, effective_seq_len))).astype(bool)
+        chex.assert_shape(valid_mask, (effective_seq_len, effective_seq_len))
+        
+        # Insert valid causal mask into full mask 
+        mask = mask.at[:effective_seq_len, :effective_seq_len].set(valid_mask)
+        
+        # Final assertion on return value
+        chex.assert_shape(mask, (self.n_max_points, self.n_max_points))
+        
+        return mask
+
+    def curriculum_increment(self):
+        """Enhanced curriculum learning that can increment multiple dimensions."""
+        changes = []
+        
+        # Increment n_points (original curriculum)
+        old_n_points = self.n_points
+        self.n_points = min(self.n_points + self.curriculum_n_points_increment, 
+                           self.n_max_points)
+        if self.n_points > old_n_points:
+            changes.append(f"n_points {old_n_points} -> {self.n_points}")
+        
+        # Increment hidden size curriculum
+        old_hidden_size = self.current_hidden_size
+        self.current_hidden_size = min(self.current_hidden_size + self.curriculum_hidden_increment,
+                                     self.max_hidden_size)
+        if self.current_hidden_size > old_hidden_size:
+            changes.append(f"hidden_size {old_hidden_size} -> {self.current_hidden_size}")
+        
+        # Increment dimension curriculum  
+        old_n_dims = self.current_n_dims
+        self.current_n_dims = min(self.current_n_dims + self.curriculum_dims_increment,
+                                self.max_n_dims)
+        if self.current_n_dims > old_n_dims:
+            changes.append(f"n_dims {old_n_dims} -> {self.current_n_dims}")
+        
+        # Log all changes
+        if changes:
+            logging.info(f"Curriculum increment: {', '.join(changes)}")
+
+    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+        if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
+            self.curriculum_increment()
+
+        (tasks, weights) = self.sample_tasks(step)
+        chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
+        chex.assert_shape(weights, (self.batch_size, 1))
+
+        init, targets = self.evaluate(tasks, step)
+        chex.assert_shape(init, (self.batch_size, self.max_n_dims))
+        chex.assert_shape(targets, (self.batch_size, self.n_points, self.max_n_dims))
+
+        data = jnp.concatenate((init[:, None, :], targets[:, :-1, :]), axis=1)
+        chex.assert_shape(data, (self.batch_size, self.n_points, self.max_n_dims))
+
+        attention_mask = self.generate_attention_mask()
+        chex.assert_shape(attention_mask, (self.n_max_points, self.n_max_points))
+
+        return data, tasks, weights, targets, attention_mask
+
+    @jax.jit
+    def evaluate_oracle(self, data: Array, tasks: Array) -> Array:
+        """Oracle prediction using MLP drift."""
+        # Identify actual dimensions from input (should match current curriculum dimensions)
+        batch_size_actual, n_points_actual, n_dims_actual = data.shape
+        chex.assert_shape(data, (batch_size_actual, n_points_actual, n_dims_actual))
+        chex.assert_equal(n_dims_actual, self.max_n_dims)  # Data should always be padded to max_n_dims
+        
+        task_bs_actual, task_n_dims_actual, one_dim = tasks.shape
+        chex.assert_shape(tasks, (task_bs_actual, task_n_dims_actual, one_dim))
+        chex.assert_equal(one_dim, 1)
+
+        mlp_params = self.get_params_from_tasks(tasks)
+        prev_states = data 
+        chex.assert_shape(prev_states, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        # Oracle: apply MLP drift with curriculum masking
+        drift = self.apply_mlp_drift(prev_states, mlp_params)
+        chex.assert_shape(drift, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        drift = drift * self.ou_step
+
+        t = jnp.arange(n_points_actual)[:, None]
+        s = jnp.arange(n_points_actual)[None, :]
+        g_coefs = jnp.where(s <= t, (t - s + 1) ** (-self.kernel_exponent), 0.0)
+        chex.assert_shape(g_coefs, (n_points_actual, n_points_actual))
+
+        change = jnp.einsum('ts,bsd->btd', g_coefs, drift)
+        chex.assert_shape(change, (batch_size_actual, n_points_actual, n_dims_actual))
+        
+        oracle_states = prev_states + change
+        chex.assert_shape(oracle_states, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        # Final assertion on return value
+        oracle_bs, oracle_points, oracle_dims = oracle_states.shape
+        chex.assert_shape(oracle_states, (oracle_bs, oracle_points, oracle_dims))
+        chex.assert_equal(oracle_bs, batch_size_actual)
+        chex.assert_equal(oracle_points, n_points_actual)
+        chex.assert_equal(oracle_dims, n_dims_actual)
+
+        return oracle_states
+
+    def get_default_eval_tasks(
+            self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], task_centers: List[float] | None = None, **kwargs
+            ) -> list["MLPSDETask"]:
+        del kwargs
+        assert task_seed != self.task_seed
+        assert data_seed != self.data_seed
+        assert noise_seed != self.noise_seed
+        config = dataclasses.asdict(self)
+        config["batch_size"] = batch_size
+        config["task_seed"] = task_seed
+        config["data_seed"] = data_seed
+        config["noise_seed"] = noise_seed
+        config["n_tasks"] = 0
+        config["n_data"] = 0
+        config["n_max_points"] = self.n_max_points
+        config["use_curriculum"] = False  # Disable curriculum for evaluation
+        config["use_weights"] = False
+        eval_tasks = []
+        n_points = eval_n_points
+        assert n_points <= self.n_max_points, f"n_points {n_points} exceeds n_max_points {self.n_max_points}"
+        config["n_points"] = n_points
+        # Increment seeds
+        config["task_seed"] += 1
+        config["data_seed"] += 1
+        config["noise_seed"] += 1
+
+        # Test  with fresh tasks from training distribution
+        name = f"Test tasks"
+        config["name"] = name
+        eval_tasks.append(self.__class__(**config))
+
+        # Test with same tasks as training distribution
+        if self.n_tasks > 0:
+            # Increment seeds
+            config["task_seed"] += 1
+            config["data_seed"] += 1
+            config["noise_seed"] += 1
+
+            name = f"Train tasks"
+            config["n_tasks"] = self.n_tasks
+            config["name"] = name
+            eval_tasks.append(VolterraTask.from_task_pool(**config, task_pool=self.task_pool.copy(), weights=self.weights.copy()))
+        
+        config["n_tasks"] = 0  # Reset for fresh tasks
+
+        # Test with fixed task centers
+        if task_centers is not None:
+            config["distrib_name"] = "normal"  # Reset to normal distribution for fixed tasks
+            for task_center in task_centers:
+                # Increment seeds
+                config["task_seed"] += 1
+                config["data_seed"] += 1
+                config["noise_seed"] += 1
+
+                config["task_center"] = task_center
+                config["clip"] = None
+                name = f"Fixed task {task_center}"
+                config["name"] = name
+                eval_tasks.append(self.__class__(**config))
+        return eval_tasks
+
+    def get_default_eval_models(self) -> list[Model]:
+        return [get_model(name="last_value"), get_model(name="arma", dtype=self.dtype), get_model(name="corrected_last_value")]
+
+    def _tree_flatten(self):
+        # Dynamic values (arrays, keys, and values that can change)
+        children = (
+            self.data_key,
+            self.task_key, 
+            self.noise_key,
+            self.task_pool,
+            self.weights,
+            self.data_pool,
+            self.data_scale,
+            self.task_scale,
+            self.noise_scale,
+            self.task_center,
+            self.clip,
+        )
+        
+        # Static values (configuration that doesn't change during execution)
+        aux_data = {
+            'n_tasks': self.n_tasks,
+            'n_data': self.n_data,
+            'n_dims': self.n_dims,
+            'n_points': self.n_points,
+            'batch_size': self.batch_size,
+            'data_seed': self.data_seed,
+            'task_seed': self.task_seed,
+            'noise_seed': self.noise_seed,
+            'dtype': self.dtype,
+            'n_max_points': self.n_max_points,
+            'name': self.name,
+            'eval_ridge': self.eval_ridge,
+            'use_weights': self.use_weights,
+            'use_weight_sampling': self.use_weight_sampling,
+            'distrib_name': self.distrib_name,
+            'distrib_param': self.distrib_param,
+            'use_curriculum': self.use_curriculum,
+            'curriculum_n_points_increment': self.curriculum_n_points_increment,
+            'curriculum_steps_thresh': self.curriculum_steps_thresh,
+            'ou_step': self.ou_step,
+            'hidden_size': self.hidden_size,
+            'task_n_dims': self.task_n_dims,
+            'max_hidden_size': self.max_hidden_size,
+            'curriculum_hidden_increment': self.curriculum_hidden_increment,
+            'min_hidden_size': self.min_hidden_size,
+            'max_n_dims': self.max_n_dims,
+            'curriculum_dims_increment': self.curriculum_dims_increment,
+            'min_n_dims': self.min_n_dims,
+            'current_hidden_size': self.current_hidden_size,
+            'current_n_dims': self.current_n_dims,
+            'data_noise_trunc_radius': self.data_noise_trunc_radius,
+            'kernel_exponent': self.kernel_exponent,
+        }
+        
+        return (children, aux_data)
+
+    @classmethod
+    def _tree_unflatten(cls, aux_data, children):
+        (data_key, task_key, noise_key, task_pool, weights, data_pool,
+         data_scale, task_scale, noise_scale, task_center, clip) = children
+        
+        # Create object with aux_data parameters and placeholder scale values
+        obj = cls(data_scale=1.0, task_scale=1.0, noise_scale=1.0, 
+                 task_center=0.0, clip=None, _skip_init=True, **aux_data)
+        
+        # Set the dynamic values
+        obj.data_key = data_key
+        obj.task_key = task_key
+        obj.noise_key = noise_key
+        obj.task_pool = task_pool
+        obj.weights = weights
+        obj.data_pool = data_pool
+        obj.data_scale = data_scale
+        obj.task_scale = task_scale
+        obj.noise_scale = noise_scale
+        obj.task_center = task_center
+        obj.clip = clip
+        
+        return obj
+
+
+tree_util.register_pytree_node(
+        VolterraTask,
+        VolterraTask._tree_flatten,
+        VolterraTask._tree_unflatten
+        )
+
+
+
 ########################################################################################################################
 # Get Task                                                                                                             #
 ########################################################################################################################
@@ -1619,5 +2310,6 @@ def get_task(name: str, **kwargs) -> Task:
             "noisy_linear_regression": NoisyLinearRegression,
             "ornstein_uhlenbeck": OrnsteinUhlenbeckTask,
             "mlp_sde": MLPSDETask,
+            "volterra": VolterraTask,
             }
     return tasks[name](**kwargs)
