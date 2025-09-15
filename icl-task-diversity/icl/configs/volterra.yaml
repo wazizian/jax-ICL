@@ -16,7 +16,7 @@ task:
   noise_seed: 103
   data_scale: 1.0
   task_scale: 0.2
-  noise_scale: 0.5
+  noise_scale: 0.8
   clip: null
   use_weights: false
   eval_ridge: false
@@ -24,7 +24,8 @@ task:
   distrib_param: .inf
   ou_step: 0.8
   hidden_size: 16          # Ending hidden size
-  kernel_exponent: 5.   # Exponent for RBF kernel
+  kernel_exponent: 1.   # Exponent for RBF kernel
+  inner_steps: 10
 
 
   # Extended Curriculum Learning Configuration

@@ -1643,6 +1643,7 @@ class VolterraTask:
     task_n_dims: int | None = None  # Automatically computed based on MLP parameters
     data_noise_trunc_radius: float = 10  # Truncation radius Gaussian noise for Volterra SDE
     kernel_exponent: float = 1.
+    inner_steps:int = 10  # Number of inner steps for Volterra SDE
 
     
     # Extended curriculum learning parameters - use defaults that match base parameters
@@ -1796,8 +1797,8 @@ class VolterraTask:
             chex.assert_shape(drift_full, (self.max_n_dims,))
 
             # Normalize drift to prevent explosion
-            drift_full = jnp.clip(drift_full, -1.0, 1.0)  # Clip to prevent extreme drift values
-            drift_full = drift_full + 0.1 * x_padded  # Add small linear term for stability
+            drift_full = jnp.clip(drift_full, -5.0, 5.0)  # Clip to prevent extreme drift values
+            drift_full = drift_full + 0.01 * x_padded  # Add small linear term for stability
             
             # Apply output dimension mask and truncate to current dimensions
             drift_current = drift_full[:n_dims_actual]  # (n_dims_actual,)
@@ -1931,22 +1932,24 @@ class VolterraTask:
 
         key = jax.random.fold_in(self.noise_key, step)
         # Generate noise using CURRENT dimensions (curriculum masking)
+        n_points_loop = self.n_points * self.inner_steps
         all_noise = jax.random.truncated_normal(
                 key,
                 -self.data_noise_trunc_radius / self.noise_scale,
                 self.data_noise_trunc_radius / self.noise_scale,
-                shape = (self.n_points+1, self.batch_size, self.current_n_dims),
+                shape = (n_points_loop+1, self.batch_size, self.current_n_dims),
                 dtype = self.dtype
                 ) * self.noise_scale
-        chex.assert_shape(all_noise, (self.n_points+1, self.batch_size, self.current_n_dims))
+        chex.assert_shape(all_noise, (n_points_loop+1, self.batch_size, self.current_n_dims))
 
         init = all_noise[0, :, :]
         chex.assert_shape(init, (self.batch_size, self.current_n_dims))
 
         all_noise = all_noise[1:, :, :]
-        chex.assert_shape(all_noise, (self.n_points, self.batch_size, self.current_n_dims))
+        chex.assert_shape(all_noise, (n_points_loop, self.batch_size, self.current_n_dims))
 
-        indices = jnp.arange(self.n_points+1)
+        indices = jnp.arange(n_points_loop + 1)
+        ou_step = self.ou_step / self.inner_steps
 
         def compute_change(state, noise):
             """
@@ -1964,7 +1967,7 @@ class VolterraTask:
             drift = drift_3d[:, 0, :]  # (batch_size, current_n_dims)
             chex.assert_shape(drift, (self.batch_size, self.current_n_dims))
 
-            change = -drift * self.ou_step + jnp.sqrt(self.ou_step) * noise
+            change = -drift * ou_step + jnp.sqrt(ou_step) * noise
             chex.assert_shape(change, (self.batch_size, self.current_n_dims))
 
             return change
@@ -1976,10 +1979,10 @@ class VolterraTask:
             Returns X_(t+1) and updates all_changes.
             """
             all_changes = carry
-            chex.assert_shape(all_changes, (self.n_points+1, self.batch_size, self.current_n_dims))
-
-            g_coefs = jax.lax.select(indices <= t, (t - indices + 1) ** (-self.kernel_exponent), indices * 0.0)
-            chex.assert_shape(g_coefs, (self.n_points+1,))
+            chex.assert_shape(all_changes, (n_points_loop+1, self.batch_size, self.current_n_dims))
+            total_time = self.n_points * self.ou_step
+            g_coefs = jax.lax.select(indices <= t, (t/total_time - indices/total_time + 1) ** (-self.kernel_exponent), indices * 0.0)
+            chex.assert_shape(g_coefs, (n_points_loop+1,))
 
             new_state = jnp.einsum('s,sbd->bd', g_coefs, all_changes)
             chex.assert_shape(new_state, (self.batch_size, self.current_n_dims))
@@ -1995,9 +1998,9 @@ class VolterraTask:
             return new_all_changes, new_state
             
         # Run the MLP SDE for n_points steps
-        all_changes_init =  jnp.zeros((self.n_points+1, self.batch_size, self.current_n_dims), dtype=self.dtype)
+        all_changes_init =  jnp.zeros((n_points_loop+1, self.batch_size, self.current_n_dims), dtype=self.dtype)
         # Note all_changes_init[self.n_points, :, :] is unused
-        all_changes_init = all_changes_init.at[1:self.n_points, :, :].set(all_noise[1:, :, :])
+        all_changes_init = all_changes_init.at[1:n_points_loop, :, :].set(all_noise[1:, :, :])
 
         init_change = compute_change(init, all_changes_init[0, :, :])
         chex.assert_shape(init_change, (self.batch_size, self.current_n_dims))
@@ -2005,6 +2008,10 @@ class VolterraTask:
         all_changes_init = all_changes_init.at[0, :, :].set(init_change)
 
         _, sde_steps = jax.lax.scan(mlp_sde_step, all_changes_init, indices[:-1])
+        chex.assert_shape(sde_steps, (n_points_loop, self.batch_size, self.current_n_dims))
+
+        # Downsample to original n_points
+        sde_steps = sde_steps[self.inner_steps-1::self.inner_steps, :, :]  # Shape: (n_points, batch_size, current_n_dims)
         chex.assert_shape(sde_steps, (self.n_points, self.batch_size, self.current_n_dims))
 
         sde_steps = jnp.transpose(sde_steps, (1, 0, 2))  # Shape: (batch_size, n_points, current_n_dims)
@@ -2129,7 +2136,9 @@ class VolterraTask:
 
         t = jnp.arange(n_points_actual)[:, None]
         s = jnp.arange(n_points_actual)[None, :]
-        g_coefs = jnp.where(s <= t, (t - s + 1) ** (-self.kernel_exponent), 0.0)
+        assert n_points_actual == self.n_points
+        total_time = n_points_actual * self.ou_step
+        g_coefs = jnp.where(s <= t, (t / total_time - s /total_time + 1) ** (-self.kernel_exponent), 0.0)
         chex.assert_shape(g_coefs, (n_points_actual, n_points_actual))
 
         change = jnp.einsum('ts,bsd->btd', g_coefs, drift)
@@ -2261,6 +2270,7 @@ class VolterraTask:
             'current_n_dims': self.current_n_dims,
             'data_noise_trunc_radius': self.data_noise_trunc_radius,
             'kernel_exponent': self.kernel_exponent,
+            'inner_steps': self.inner_steps,
         }
         
         return (children, aux_data)
