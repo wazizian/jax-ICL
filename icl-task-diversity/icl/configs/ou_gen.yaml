@@ -11,7 +11,7 @@ task:
   n_points: 32
   n_max_points: 32
   use_curriculum: false
-  batch_size: 256
+  batch_size: 512
   data_seed: 101
   task_seed: 102
   noise_seed: 103
@@ -20,9 +20,10 @@ task:
   noise_scale: 0.5
   clip: null
   use_weights: false
+  use_weight_sampling: false
   eval_ridge: false
-  distrib_name: student
-  distrib_param: .inf
+  distrib_name: generalized_normal
+  distrib_param: 2
   ou_step: 0.8
 
 model:
@@ -40,10 +41,10 @@ training:
   optimizer: adamw
   lr: 2.0e-3
   schedule: warmup_cosine_decay
-  warmup_steps: 50_000
-  total_steps: 400_000
+  warmup_steps: 100_000
+  total_steps: 500_000
   weight_decay: 0.1
-  clip_max_norm: 1.0
+  clip_max_norm: null
 
 eval:
   n_samples: 2048
@@ -82,6 +83,7 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      task.distrib_param: inf, 3.0, 5.0, 10.0
+      add_seed: 1, 2, 3
+      task.distrib_param:  1.0, 1.5, 2.0, 2.5
       training.lr: 1e-3, 1e-4
       task.use_weights: false
