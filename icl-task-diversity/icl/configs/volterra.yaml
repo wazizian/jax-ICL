@@ -8,7 +8,7 @@ task:
   n_tasks: 0
   n_data: 0
   n_dims: 4               # Ending dimensions (will grow to max_n_dims)
-  n_points: 16            # Starting n_points (will grow with curriculum)
+  n_points: 64            # Starting n_points (will grow with curriculum)
   n_max_points: 64        # Ending n_points (should match model n_points)
   batch_size: 256
   data_seed: 101
@@ -16,7 +16,7 @@ task:
   noise_seed: 103
   data_scale: 1.0
   task_scale: 0.2
-  noise_scale: 0.8
+  noise_scale: 0.5
   clip: null
   use_weights: false
   eval_ridge: false
@@ -25,7 +25,7 @@ task:
   ou_step: 0.8
   hidden_size: 16          # Ending hidden size
   kernel_exponent: 1.   # Exponent for RBF kernel
-  inner_steps: 10
+  inner_steps: 1  # DO NOT USE, eval is broken for inner_steps > 1
 
 
   # Extended Curriculum Learning Configuration

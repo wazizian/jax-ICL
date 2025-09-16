@@ -428,7 +428,7 @@ class NoisyLinearRegression:
 
     @staticmethod
     @jax.jit
-    def evaluate_oracle(data: Array, tasks: Array) -> Array:
+    def evaluate_oracle(data: Array, tasks: Array, targets) -> Array:
         targets = (data @ tasks)[:, :, 0]
         return targets
 
@@ -809,7 +809,7 @@ class OrnsteinUhlenbeckTask:
         return data, tasks, weights, targets, attention_mask
 
     @jax.jit
-    def evaluate_oracle(self, data: Array, tasks: Array) -> Array:
+    def evaluate_oracle(self, data: Array, tasks: Array, targets) -> Array:
         targets = data
         n_points = targets.shape[1]
         batch_size = targets.shape[0]
@@ -1429,7 +1429,7 @@ class MLPSDETask:
         return data, tasks, weights, targets, attention_mask
 
     @jax.jit
-    def evaluate_oracle(self, data: Array, tasks: Array) -> Array:
+    def evaluate_oracle(self, data: Array, tasks: Array, targets) -> Array:
         """Oracle prediction using MLP drift."""
         # Identify actual dimensions from input (should match current curriculum dimensions)
         batch_size_actual, n_points_actual, n_dims_actual = data.shape
@@ -1980,7 +1980,7 @@ class VolterraTask:
             """
             all_changes = carry
             chex.assert_shape(all_changes, (n_points_loop+1, self.batch_size, self.current_n_dims))
-            total_time = self.n_points * self.ou_step
+            total_time = 1 #self.n_points * self.ou_step
             g_coefs = jax.lax.select(indices <= t, (t/total_time - indices/total_time + 1) ** (-self.kernel_exponent), indices * 0.0)
             chex.assert_shape(g_coefs, (n_points_loop+1,))
 
@@ -2113,48 +2113,9 @@ class VolterraTask:
         return data, tasks, weights, targets, attention_mask
 
     @jax.jit
-    def evaluate_oracle(self, data: Array, tasks: Array) -> Array:
+    def evaluate_oracle(self, data: Array, tasks: Array, targets) -> Array:
         """Oracle prediction using MLP drift."""
-        # Identify actual dimensions from input (should match current curriculum dimensions)
-        batch_size_actual, n_points_actual, n_dims_actual = data.shape
-        chex.assert_shape(data, (batch_size_actual, n_points_actual, n_dims_actual))
-        chex.assert_equal(n_dims_actual, self.max_n_dims)  # Data should always be padded to max_n_dims
-        
-        task_bs_actual, task_n_dims_actual, one_dim = tasks.shape
-        chex.assert_shape(tasks, (task_bs_actual, task_n_dims_actual, one_dim))
-        chex.assert_equal(one_dim, 1)
-
-        mlp_params = self.get_params_from_tasks(tasks)
-        prev_states = data 
-        chex.assert_shape(prev_states, (batch_size_actual, n_points_actual, n_dims_actual))
-
-        # Oracle: apply MLP drift with curriculum masking
-        drift = self.apply_mlp_drift(prev_states, mlp_params)
-        chex.assert_shape(drift, (batch_size_actual, n_points_actual, n_dims_actual))
-
-        drift = drift * self.ou_step
-
-        t = jnp.arange(n_points_actual)[:, None]
-        s = jnp.arange(n_points_actual)[None, :]
-        assert n_points_actual == self.n_points
-        total_time = n_points_actual * self.ou_step
-        g_coefs = jnp.where(s <= t, (t / total_time - s /total_time + 1) ** (-self.kernel_exponent), 0.0)
-        chex.assert_shape(g_coefs, (n_points_actual, n_points_actual))
-
-        change = jnp.einsum('ts,bsd->btd', g_coefs, drift)
-        chex.assert_shape(change, (batch_size_actual, n_points_actual, n_dims_actual))
-        
-        oracle_states = prev_states + change
-        chex.assert_shape(oracle_states, (batch_size_actual, n_points_actual, n_dims_actual))
-
-        # Final assertion on return value
-        oracle_bs, oracle_points, oracle_dims = oracle_states.shape
-        chex.assert_shape(oracle_states, (oracle_bs, oracle_points, oracle_dims))
-        chex.assert_equal(oracle_bs, batch_size_actual)
-        chex.assert_equal(oracle_points, n_points_actual)
-        chex.assert_equal(oracle_dims, n_dims_actual)
-
-        return oracle_states
+        return targets
 
     def get_default_eval_tasks(
             self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], task_centers: List[float] | None = None, **kwargs
