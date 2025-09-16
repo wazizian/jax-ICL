@@ -21,29 +21,63 @@ from task_shift import (
 
 def compute_min_mean_end_mse_for_prefix(mse_values: jnp.ndarray, prefix_length: int) -> tuple[float, float, float]:
     """Compute min, mean, and end MSE over a specific sequence length prefix (NOT JIT compiled to handle dynamic prefix).
-    
+
     Args:
         mse_values: MSE values over context positions
         prefix_length: Number of positions to include from the beginning (must be <= len(mse_values))
-        
+
     Returns:
         tuple: (min_mse_excluding_first, mean_mse_prefix, end_mse_prefix)
     """
     # Ensure prefix_length doesn't exceed available data
     actual_prefix = min(prefix_length, len(mse_values))
-    
+
     # Take only the first prefix_length positions using numpy-style slicing
     prefix_values = mse_values[:actual_prefix]
-    
+
     # Skip first position (index 0) for min MSE as per original code
     if len(prefix_values) > 1:
         min_mse = jnp.min(prefix_values[1:])
     else:
         min_mse = prefix_values[0]
-    
+
     mean_mse = jnp.mean(prefix_values)
     end_mse = prefix_values[actual_prefix - 1]  # MSE at last position in prefix
     return min_mse, mean_mse, end_mse
+
+
+def compute_min_mean_end_mse_std_for_prefix(mse_values: jnp.ndarray, mse_std_values: jnp.ndarray, prefix_length: int) -> tuple[float, float, float]:
+    """Compute std values for min, mean, and end MSE over a specific sequence length prefix.
+
+    Args:
+        mse_values: MSE values over context positions (needed to find min position)
+        mse_std_values: MSE std values over context positions
+        prefix_length: Number of positions to include from the beginning (must be <= len(mse_values))
+
+    Returns:
+        tuple: (min_mse_std_at_min_pos, mean_mse_std_aggregated, end_mse_std_prefix)
+    """
+    # Ensure prefix_length doesn't exceed available data
+    actual_prefix = min(prefix_length, len(mse_values))
+
+    # Take only the first prefix_length positions
+    prefix_mse_values = mse_values[:actual_prefix]
+    prefix_std_values = mse_std_values[:actual_prefix]
+
+    # Find min MSE position (skip first position as per original code)
+    if len(prefix_mse_values) > 1:
+        min_pos = jnp.argmin(prefix_mse_values[1:]) + 1  # +1 because we skipped index 0
+        min_mse_std = prefix_std_values[min_pos]
+    else:
+        min_mse_std = prefix_std_values[0]
+
+    # Mean MSE std: sqrt of average of std²
+    mean_mse_std = jnp.sqrt(jnp.mean(prefix_std_values ** 2))
+
+    # End MSE std: std at last position in prefix
+    end_mse_std = prefix_std_values[actual_prefix - 1]
+
+    return min_mse_std, mean_mse_std, end_mse_std
 
 
 @partial(jit, static_argnames=('num_steps', 'num_tasks'))
@@ -177,6 +211,153 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
         
     except Exception as e:
         return float('inf')
+
+
+def extract_std_mse_params_for_baseline_with_prefix(log: dict, baseline_type: str, prefix_length: int, return_selected_steps: bool = False) -> tuple[dict, dict, dict] | tuple[dict, dict, dict, dict]:
+    """Extract std values for min, mean, and end MSE over sequence length prefix for iteration with minimal AUC of log MSE over shift distance for all tasks for a specific baseline and prefix.
+
+    Args:
+        log: The log dictionary
+        baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
+        prefix_length: Number of sequence positions to include from the beginning
+        return_selected_steps: If True, also return which steps were selected
+
+    Returns:
+        tuple: (min_mse_std_dict, mean_mse_std_dict, end_mse_std_dict) or (min_mse_std_dict, mean_mse_std_dict, end_mse_std_dict, selected_steps_dict) where:
+            min_mse_std_dict: {task_name: std_at_min_mse_pos_over_prefix}
+            mean_mse_std_dict: {task_name: aggregated_std_over_prefix}
+            end_mse_std_dict: {task_name: std_at_prefix_end}
+            selected_steps_dict: {task_name: (min_mse_step, mean_mse_step, end_mse_step)} - only if return_selected_steps=True
+    """
+    eval_steps = log.get("eval/step", [])
+    if not eval_steps:
+        if return_selected_steps:
+            return {}, {}, {}, {}
+        else:
+            return {}, {}, {}
+
+    # Extract evaluation metrics for all steps
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/") and key != "eval/step":
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+
+    # Find tasks that match our criteria and baseline - look for both MSE and MSE_Std
+    task_data = {}  # {task_name: (shift_distance, mse_values, mse_std_values)}
+
+    for task_name, metrics in eval_metrics.items():
+        # Include both Test tasks and Fixed task
+        if task_name == "Test tasks" or task_name.startswith("Fixed task"):
+            # Look for the specific baseline type MSE values
+            selected_mse_metric = None
+            selected_std_metric = None
+            for metric_name, values in metrics.items():
+                if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                    if "(Std)" in metric_name:
+                        selected_std_metric = (metric_name, values)
+                    else:
+                        selected_mse_metric = (metric_name, values)
+
+            if selected_mse_metric and selected_std_metric:
+                _, mse_values = selected_mse_metric
+                _, std_values = selected_std_metric
+                shift_distance = extract_task_shift_distance(task_name)
+                task_data[task_name] = (shift_distance, mse_values, std_values)
+
+    if not task_data:
+        if return_selected_steps:
+            return {}, {}, {}, {}
+        else:
+            return {}, {}, {}
+
+    # Sort tasks by shift distance for consistent ordering
+    sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
+    task_names = [task_name for task_name, _ in sorted_tasks]
+    shift_distances = jnp.array([shift_dist for _, (shift_dist, _, _) in sorted_tasks])
+
+    # Collect MSE and MSE_Std data for all steps and tasks using the prefix length
+    num_steps = len(eval_steps)
+    num_tasks = len(sorted_tasks)
+
+    all_min_mse = np.zeros((num_steps, num_tasks))
+    all_mean_mse = np.zeros((num_steps, num_tasks))
+    all_end_mse = np.zeros((num_steps, num_tasks))
+
+    all_min_mse_std = np.zeros((num_steps, num_tasks))
+    all_mean_mse_std = np.zeros((num_steps, num_tasks))
+    all_end_mse_std = np.zeros((num_steps, num_tasks))
+
+    for task_idx, (task_name, (shift_dist, mse_values, std_values)) in enumerate(sorted_tasks):
+        for step_idx in range(num_steps):
+            if step_idx < len(mse_values) and step_idx < len(std_values):
+                mse_vals = normalize_error_values(mse_values[step_idx])
+                std_vals = normalize_error_values(std_values[step_idx])
+                if mse_vals is not None and std_vals is not None and len(mse_vals) > 0 and len(std_vals) > 0:
+                    # Convert to JAX arrays for computation
+                    mse_jax = jnp.array(mse_vals)
+                    std_jax = jnp.array(std_vals)
+
+                    # Compute MSE statistics for AUC computation (unchanged)
+                    min_mse, mean_mse, end_mse = compute_min_mean_end_mse_for_prefix(mse_jax, prefix_length)
+                    all_min_mse[step_idx, task_idx] = float(min_mse)
+                    all_mean_mse[step_idx, task_idx] = float(mean_mse)
+                    all_end_mse[step_idx, task_idx] = float(end_mse)
+
+                    # Compute corresponding std statistics
+                    min_mse_std, mean_mse_std, end_mse_std = compute_min_mean_end_mse_std_for_prefix(mse_jax, std_jax, prefix_length)
+                    all_min_mse_std[step_idx, task_idx] = float(min_mse_std)
+                    all_mean_mse_std[step_idx, task_idx] = float(mean_mse_std)
+                    all_end_mse_std[step_idx, task_idx] = float(end_mse_std)
+                else:
+                    all_min_mse[step_idx, task_idx] = float('inf')
+                    all_mean_mse[step_idx, task_idx] = float('inf')
+                    all_end_mse[step_idx, task_idx] = float('inf')
+                    all_min_mse_std[step_idx, task_idx] = 0.0
+                    all_mean_mse_std[step_idx, task_idx] = 0.0
+                    all_end_mse_std[step_idx, task_idx] = 0.0
+            else:
+                all_min_mse[step_idx, task_idx] = float('inf')
+                all_mean_mse[step_idx, task_idx] = float('inf')
+                all_end_mse[step_idx, task_idx] = float('inf')
+                all_min_mse_std[step_idx, task_idx] = 0.0
+                all_mean_mse_std[step_idx, task_idx] = 0.0
+                all_end_mse_std[step_idx, task_idx] = 0.0
+
+    # Convert to JAX arrays for optimized computation
+    all_min_mse_jax = jnp.array(all_min_mse)
+    all_mean_mse_jax = jnp.array(all_mean_mse)
+    all_end_mse_jax = jnp.array(all_end_mse)
+
+    # Find best steps with minimal AUC (JIT compiled) - use MSE values for selection, not std
+    best_min_step, best_mean_step, best_end_step = find_best_step_by_auc(
+        all_min_mse_jax, all_mean_mse_jax, all_end_mse_jax, shift_distances, num_steps, num_tasks
+    )
+
+    # Extract std results from the best steps (determined by MSE AUC)
+    min_mse_std_results = {}
+    mean_mse_std_results = {}
+    end_mse_std_results = {}
+    selected_steps = {}
+
+    for task_idx, task_name in enumerate(task_names):
+        min_mse_std_results[task_name] = float(all_min_mse_std[int(best_min_step), task_idx])
+        mean_mse_std_results[task_name] = float(all_mean_mse_std[int(best_mean_step), task_idx])
+        end_mse_std_results[task_name] = float(all_end_mse_std[int(best_end_step), task_idx])
+        if return_selected_steps:
+            # Convert JAX array indices to Python ints and then to actual step numbers
+            min_step_num = eval_steps[int(best_min_step)]
+            mean_step_num = eval_steps[int(best_mean_step)]
+            end_step_num = eval_steps[int(best_end_step)]
+            selected_steps[task_name] = (min_step_num, mean_step_num, end_step_num)
+
+    if return_selected_steps:
+        return min_mse_std_results, mean_mse_std_results, end_mse_std_results, selected_steps
+    else:
+        return min_mse_std_results, mean_mse_std_results, end_mse_std_results
 
 
 def extract_min_mse_params_for_baseline_with_prefix(log: dict, baseline_type: str, prefix_length: int, return_selected_steps: bool = False) -> tuple[dict, dict, dict] | tuple[dict, dict, dict, dict]:
@@ -567,19 +748,22 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
     return loaded_data
 
 
-def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_type: str) -> dict[int, tuple[dict, dict, dict, dict]]:
+def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_type: str) -> dict[int, tuple[dict, dict, dict, dict, dict, dict, dict]]:
     """Process pre-loaded data for a specific baseline at multiple sequence length prefixes without any I/O.
-    
+
     Args:
         loaded_data: Dictionary returned by load_all_logs()
         baseline_type: Either 'Ridge' or 'True' to specify which baseline to use
-    
+
     Returns:
-        dict: {prefix_length: (min_mse_dict, mean_mse_dict, end_mse_dict, selected_steps_dict)} where:
+        dict: {prefix_length: (min_mse_dict, mean_mse_dict, end_mse_dict, min_std_dict, mean_std_dict, end_std_dict, selected_steps_dict)} where:
             prefix_length: Sequence length prefix (16, 32, 48, etc.)
             min_mse_dict: {run_label: [(task_center, min_mse, task_name), ...]}
             mean_mse_dict: {run_label: [(task_center, mean_mse, task_name), ...]}
             end_mse_dict: {run_label: [(task_center, end_mse, task_name), ...]}
+            min_std_dict: {run_label: [(task_center, min_mse_std, task_name), ...]}
+            mean_std_dict: {run_label: [(task_center, mean_mse_std, task_name), ...]}
+            end_std_dict: {run_label: [(task_center, end_mse_std, task_name), ...]}
             selected_steps_dict: {run_label: {task_name: (min_step, mean_step, end_step)}}
     """
     # First, determine the sequence length of the data by examining one run
@@ -620,27 +804,44 @@ def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_t
     
     # Process data for each prefix length
     results_by_prefix = {}
-    
+
     for prefix_length in prefix_lengths:
         min_mse_data = {}
         mean_mse_data = {}
         end_mse_data = {}
+        min_std_data = {}
+        mean_std_data = {}
+        end_std_data = {}
         selected_steps_data = {}
-        
+
         for run_label in loaded_data['run_labels']:
             log = loaded_data['logs'][run_label]
             config, task_centers = loaded_data['metadata'][run_label]
-            
+
             # Extract MSE data for this specific prefix length
             try:
                 min_mse_params, mean_mse_params, end_mse_params, selected_steps = extract_min_mse_params_for_baseline_with_prefix(
                     log, baseline_type, prefix_length, return_selected_steps=True
                 )
-                
+
+                # Try to extract std data - this may fail if std data is not available
+                try:
+                    min_std_params, mean_std_params, end_std_params, _ = extract_std_mse_params_for_baseline_with_prefix(
+                        log, baseline_type, prefix_length, return_selected_steps=True
+                    )
+                    has_std_data = True
+                except Exception:
+                    # Std data not available, create empty dicts
+                    min_std_params, mean_std_params, end_std_params = {}, {}, {}
+                    has_std_data = False
+
                 min_mse_run_data = []
                 mean_mse_run_data = []
                 end_mse_run_data = []
-                
+                min_std_run_data = []
+                mean_std_run_data = []
+                end_std_run_data = []
+
                 # Add Test tasks (task center = 0)
                 if "Test tasks" in min_mse_params:
                     min_mse = min_mse_params["Test tasks"]
@@ -649,7 +850,19 @@ def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_t
                     min_mse_run_data.append((0.0, min_mse, "Test tasks"))
                     mean_mse_run_data.append((0.0, mean_mse, "Test tasks"))
                     end_mse_run_data.append((0.0, end_mse, "Test tasks"))
-                
+
+                    if has_std_data:
+                        min_std = min_std_params.get("Test tasks", 0.0)
+                        mean_std = mean_std_params.get("Test tasks", 0.0)
+                        end_std = end_std_params.get("Test tasks", 0.0)
+                        min_std_run_data.append((0.0, min_std, "Test tasks"))
+                        mean_std_run_data.append((0.0, mean_std, "Test tasks"))
+                        end_std_run_data.append((0.0, end_std, "Test tasks"))
+                    else:
+                        min_std_run_data.append((0.0, 0.0, "Test tasks"))
+                        mean_std_run_data.append((0.0, 0.0, "Test tasks"))
+                        end_std_run_data.append((0.0, 0.0, "Test tasks"))
+
                 # Add Fixed tasks
                 for task_center in task_centers:
                     task_name = f"Fixed task {task_center}"
@@ -660,18 +873,33 @@ def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_t
                         min_mse_run_data.append((task_center, min_mse, task_name))
                         mean_mse_run_data.append((task_center, mean_mse, task_name))
                         end_mse_run_data.append((task_center, end_mse, task_name))
-                
+
+                        if has_std_data:
+                            min_std = min_std_params.get(task_name, 0.0)
+                            mean_std = mean_std_params.get(task_name, 0.0)
+                            end_std = end_std_params.get(task_name, 0.0)
+                            min_std_run_data.append((task_center, min_std, task_name))
+                            mean_std_run_data.append((task_center, mean_std, task_name))
+                            end_std_run_data.append((task_center, end_std, task_name))
+                        else:
+                            min_std_run_data.append((task_center, 0.0, task_name))
+                            mean_std_run_data.append((task_center, 0.0, task_name))
+                            end_std_run_data.append((task_center, 0.0, task_name))
+
                 if min_mse_run_data:
                     min_mse_data[run_label] = min_mse_run_data
                     mean_mse_data[run_label] = mean_mse_run_data
                     end_mse_data[run_label] = end_mse_run_data
+                    min_std_data[run_label] = min_std_run_data
+                    mean_std_data[run_label] = mean_std_run_data
+                    end_std_data[run_label] = end_std_run_data
                     selected_steps_data[run_label] = selected_steps
-                    
+
             except Exception as e:
                 print(f"Warning: Failed to process {baseline_type} baseline for {run_label} at prefix {prefix_length}: {e}")
                 continue
-        
-        results_by_prefix[prefix_length] = (min_mse_data, mean_mse_data, end_mse_data, selected_steps_data)
+
+        results_by_prefix[prefix_length] = (min_mse_data, mean_mse_data, end_mse_data, min_std_data, mean_std_data, end_std_data, selected_steps_data)
     
     return results_by_prefix
 
@@ -745,7 +973,7 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
     print(f"Creating plots for sequence length prefixes: {sorted_prefixes}")
     
     # Helper function to create a plot for a specific baseline and prefix
-    def create_mse_plot(min_mse_data, mean_mse_data, end_mse_data, selected_steps_data, baseline_type: str, fig_suffix: str):
+    def create_mse_plot(min_mse_data, mean_mse_data, end_mse_data, min_std_data, mean_std_data, end_std_data, selected_steps_data, baseline_type: str, fig_suffix: str):
         # Extract prefix length from fig_suffix (e.g., 'ridge_prefix_32' -> 32)
         prefix_length = None
         if 'prefix_' in fig_suffix:
@@ -772,15 +1000,15 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         for i, (run_label, run_data) in enumerate(min_mse_data.items()):
             if not run_data:
                 continue
-            
+
             # Sort by task center
             run_data.sort(key=lambda x: x[0])
-            
+
             task_centers = [x[0] for x in run_data if x[0] <= max_shift]
             min_mses = [x[1] for x in run_data if x[0] <= max_shift]
-            
+
             color = colors[i] if i < len(colors) else colors[i % len(colors)]
-            
+
             # Create label with selected step information for min MSE
             steps_info = selected_steps_data.get(run_label, {})
             if steps_info:
@@ -790,9 +1018,24 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 label_with_step = f"{run_label} (best step: {min_step})" if min_step is not None else run_label
             else:
                 label_with_step = run_label
-            
+
+            # Get corresponding std data for shaded region
+            std_run_data = min_std_data.get(run_label, [])
+            if std_run_data:
+                std_run_data.sort(key=lambda x: x[0])
+                min_stds = [x[1] for x in std_run_data if x[0] <= max_shift]
+
+                # Create upper and lower bounds for shaded region
+                if len(min_stds) == len(min_mses):
+                    upper_bounds = [max(1e-10, mse + std) for mse, std in zip(min_mses, min_stds)]
+                    lower_bounds = [max(1e-10, mse - std) for mse, std in zip(min_mses, min_stds)]
+
+                    # Add shaded region
+                    ax1.fill_between(task_centers, lower_bounds, upper_bounds,
+                                   alpha=0.2, color=color)
+
             # Plot minimum MSE vs task center
-            ax1.plot(task_centers, min_mses, 'o-', color=color, linewidth=2, 
+            ax1.plot(task_centers, min_mses, 'o-', color=color, linewidth=2,
                     markersize=6, label=label_with_step)
         
         # Configure minimum MSE plot with prefix information
@@ -803,19 +1046,19 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         ax1.grid(True, alpha=0.3)
         ax1.set_yscale('log')
         
-        # Plot mean MSE over context length data (right subplot)
+        # Plot mean MSE over context length data (middle subplot)
         for i, (run_label, run_data) in enumerate(mean_mse_data.items()):
             if not run_data:
                 continue
-            
+
             # Sort by task center
             run_data.sort(key=lambda x: x[0])
-            
+
             task_centers = [x[0] for x in run_data if x[0] <= max_shift]
             mean_mses = [x[1] for x in run_data if x[0] <= max_shift]
-            
+
             color = colors[i] if i < len(colors) else colors[i % len(colors)]
-            
+
             # Create label with selected step information for mean MSE
             steps_info = selected_steps_data.get(run_label, {})
             if steps_info:
@@ -825,9 +1068,24 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 label_with_step = f"{run_label} (best step: {mean_step})" if mean_step is not None else run_label
             else:
                 label_with_step = run_label
-            
+
+            # Get corresponding std data for shaded region
+            std_run_data = mean_std_data.get(run_label, [])
+            if std_run_data:
+                std_run_data.sort(key=lambda x: x[0])
+                mean_stds = [x[1] for x in std_run_data if x[0] <= max_shift]
+
+                # Create upper and lower bounds for shaded region
+                if len(mean_stds) == len(mean_mses):
+                    upper_bounds = [max(1e-10, mse + std) for mse, std in zip(mean_mses, mean_stds)]
+                    lower_bounds = [max(1e-10, mse - std) for mse, std in zip(mean_mses, mean_stds)]
+
+                    # Add shaded region
+                    ax2.fill_between(task_centers, lower_bounds, upper_bounds,
+                                   alpha=0.2, color=color)
+
             # Plot mean MSE over context length vs task center
-            ax2.plot(task_centers, mean_mses, 'o-', color=color, linewidth=2, 
+            ax2.plot(task_centers, mean_mses, 'o-', color=color, linewidth=2,
                     markersize=6, label=label_with_step)
         
         # Configure mean MSE over context length plot with prefix information
@@ -837,19 +1095,19 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         ax2.grid(True, alpha=0.3)
         ax2.set_yscale('log')
         
-        # Plot end MSE data (third subplot)
+        # Plot end MSE data (right subplot)
         for i, (run_label, run_data) in enumerate(end_mse_data.items()):
             if not run_data:
                 continue
-            
+
             # Sort by task center
             run_data.sort(key=lambda x: x[0])
-            
+
             task_centers = [x[0] for x in run_data if x[0] <= max_shift]
             end_mses = [x[1] for x in run_data if x[0] <= max_shift]
-            
+
             color = colors[i] if i < len(colors) else colors[i % len(colors)]
-            
+
             # Create label with selected step information for end MSE
             steps_info = selected_steps_data.get(run_label, {})
             if steps_info:
@@ -859,9 +1117,24 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
                 label_with_step = f"{run_label} (best step: {end_step})" if end_step is not None else run_label
             else:
                 label_with_step = run_label
-            
+
+            # Get corresponding std data for shaded region
+            std_run_data = end_std_data.get(run_label, [])
+            if std_run_data:
+                std_run_data.sort(key=lambda x: x[0])
+                end_stds = [x[1] for x in std_run_data if x[0] <= max_shift]
+
+                # Create upper and lower bounds for shaded region
+                if len(end_stds) == len(end_mses):
+                    upper_bounds = [max(1e-10, mse + std) for mse, std in zip(end_mses, end_stds)]
+                    lower_bounds = [max(1e-10, mse - std) for mse, std in zip(end_mses, end_stds)]
+
+                    # Add shaded region
+                    ax3.fill_between(task_centers, lower_bounds, upper_bounds,
+                                   alpha=0.2, color=color)
+
             # Plot end MSE vs task center
-            ax3.plot(task_centers, end_mses, 'o-', color=color, linewidth=2, 
+            ax3.plot(task_centers, end_mses, 'o-', color=color, linewidth=2,
                     markersize=6, label=label_with_step)
         
         # Configure end MSE plot with prefix information
@@ -907,13 +1180,40 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
             print(f"\n{run_label}:")
             mean_data = mean_mse_data.get(run_label, [])
             end_data = end_mse_data.get(run_label, [])
+            min_std_data_run = min_std_data.get(run_label, [])
+            mean_std_data_run = mean_std_data.get(run_label, [])
+            end_std_data_run = end_std_data.get(run_label, [])
+
             mean_dict = {x[2]: x[1] for x in mean_data}  # task_name -> mean_mse
             end_dict = {x[2]: x[1] for x in end_data}  # task_name -> end_mse
-            
+            min_std_dict = {x[2]: x[1] for x in min_std_data_run}  # task_name -> min_mse_std
+            mean_std_dict = {x[2]: x[1] for x in mean_std_data_run}  # task_name -> mean_mse_std
+            end_std_dict = {x[2]: x[1] for x in end_std_data_run}  # task_name -> end_mse_std
+
             for task_center, min_mse, task_name in sorted(run_data, key=lambda x: x[0]):
                 mean_mse = mean_dict.get(task_name, "N/A")
                 end_mse = end_dict.get(task_name, "N/A")
-                print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}, mean_mse={mean_mse:.6f}, end_mse={end_mse:.6f}")
+                min_std = min_std_dict.get(task_name, 0.0)
+                mean_std = mean_std_dict.get(task_name, 0.0)
+                end_std = end_std_dict.get(task_name, 0.0)
+
+                # Format std values - show as 0.000000 if they are zero (no std data available)
+                if isinstance(min_std, (int, float)) and min_std > 0:
+                    min_std_str = f"±{min_std:.6f}"
+                else:
+                    min_std_str = "±0.000000"
+
+                if isinstance(mean_std, (int, float)) and mean_std > 0:
+                    mean_std_str = f"±{mean_std:.6f}"
+                else:
+                    mean_std_str = "±0.000000"
+
+                if isinstance(end_std, (int, float)) and end_std > 0:
+                    end_std_str = f"±{end_std:.6f}"
+                else:
+                    end_std_str = "±0.000000"
+
+                print(f"  {task_name} (center={task_center}): min_mse={min_mse:.6f}{min_std_str}, mean_mse={mean_mse:.6f}{mean_std_str}, end_mse={end_mse:.6f}{end_std_str}")
     
     # Create plots for each prefix and available baselines
     for prefix_length in sorted_prefixes:
@@ -921,14 +1221,14 @@ def plot_min_mse_analysis(run_paths: list, output_dir: Path = None, run_labels: 
         
         # Create Ridge plots for this prefix
         if create_ridge_plots and prefix_length in ridge_results_by_prefix:
-            ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data = ridge_results_by_prefix[prefix_length]
+            ridge_min_data, ridge_mean_data, ridge_end_data, ridge_min_std_data, ridge_mean_std_data, ridge_end_std_data, ridge_steps_data = ridge_results_by_prefix[prefix_length]
             if ridge_min_data:  # Only create plot if we have data
-                create_mse_plot(ridge_min_data, ridge_mean_data, ridge_end_data, ridge_steps_data, 
+                create_mse_plot(ridge_min_data, ridge_mean_data, ridge_end_data, ridge_min_std_data, ridge_mean_std_data, ridge_end_std_data, ridge_steps_data,
                               'Ridge', f'ridge_prefix_{prefix_length}')
-        
+
         # Create True plots for this prefix
         if create_true_plots and prefix_length in true_results_by_prefix:
-            true_min_data, true_mean_data, true_end_data, true_steps_data = true_results_by_prefix[prefix_length]
+            true_min_data, true_mean_data, true_end_data, true_min_std_data, true_mean_std_data, true_end_std_data, true_steps_data = true_results_by_prefix[prefix_length]
             if true_min_data:  # Only create plot if we have data
-                create_mse_plot(true_min_data, true_mean_data, true_end_data, true_steps_data, 
+                create_mse_plot(true_min_data, true_mean_data, true_end_data, true_min_std_data, true_mean_std_data, true_end_std_data, true_steps_data,
                               'True', f'true_prefix_{prefix_length}')

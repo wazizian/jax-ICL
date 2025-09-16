@@ -65,122 +65,12 @@ def load_log(run_id: str) -> dict:
     with open(log_path, "r") as f:
         return json.load(f)
 
-"""
-@lru_cache(maxsize=1024)
-def parse_tensor_key(tensor_key: str) -> tuple:
-    # Find metric type (MSE or RelErr)
-    if tensor_key.endswith('_MSE'):
-        metric_type = 'MSE'
-        base_key = tensor_key[:-4]  # Remove '_MSE'
-    elif tensor_key.endswith('_RelErr'):
-        metric_type = 'RelErr'  
-        base_key = tensor_key[:-7]  # Remove '_RelErr'
-    else:
-        return None
-    
-    # Check for transformer vs baseline pattern first
-    if '_Transformer_vs_' in base_key:
-        task_part, baseline_part = base_key.split('_Transformer_vs_', 1)
-        
-        # Optimize string replacements - avoid regex
-        task_name = task_part.replace('_', ' ')
-        # Handle decimal numbers in task names (e.g., "2_0" -> "2.0")
-        if ' ' in task_name:
-            parts = task_name.split(' ')
-            for i in range(len(parts) - 1):
-                if parts[i].isdigit() and parts[i + 1].isdigit():
-                    parts[i] = parts[i] + '.' + parts[i + 1]
-                    parts.pop(i + 1)
-                    break
-            task_name = ' '.join(parts)
-        
-        baseline_name = baseline_part.replace('_', ' ')
-        # Handle decimal numbers in baseline names
-        if ' ' in baseline_name:
-            parts = baseline_name.split(' ')
-            for i in range(len(parts) - 1):
-                if parts[i].isdigit() and parts[i + 1].isdigit():
-                    parts[i] = parts[i] + '.' + parts[i + 1]
-                    parts.pop(i + 1)
-                    break
-            baseline_name = ' '.join(parts)
-        
-        # Handle special cases
-        if task_name.startswith('Test tasks'):
-            task_name = 'Test tasks'
-        
-        # Build log key and metric key for transformer comparisons
-        log_key = f"eval/{task_name}"
-        if metric_type == 'RelErr':
-            metric_key = f"Transformer | {baseline_name} (RelErr)"
-        else:
-            metric_key = f"Transformer | {baseline_name}"
-        
-        return task_name, baseline_name, metric_key, log_key
-    
-    # Check for baseline vs baseline pattern: {task}_{baseline1}_vs_{baseline2}_{metric}
-    elif '_vs_' in base_key:
-        # Find the last '_vs_' to split baseline1 from baseline2
-        vs_pos = base_key.rfind('_vs_')
-        if vs_pos == -1:
-            return None
-            
-        # Split into task_baseline1 and baseline2
-        task_baseline1_part = base_key[:vs_pos]
-        baseline2_part = base_key[vs_pos + 4:]  # Skip '_vs_'
-        
-        # Convert underscores to spaces
-        task_baseline1_name = task_baseline1_part.replace('_', ' ')
-        baseline2_name = baseline2_part.replace('_', ' ')
-        
-        # Handle decimal numbers
-        def fix_decimals(name):
-            if ' ' in name:
-                parts = name.split(' ')
-                for i in range(len(parts) - 1):
-                    if parts[i].isdigit() and parts[i + 1].isdigit():
-                        parts[i] = parts[i] + '.' + parts[i + 1]
-                        parts.pop(i + 1)
-                        break
-                return ' '.join(parts)
-            return name
-        
-        task_baseline1_name = fix_decimals(task_baseline1_name)
-        baseline2_name = fix_decimals(baseline2_name)
-        
-        # Handle special cases for task names
-        if task_baseline1_name.startswith('Test tasks'):
-            # Extract original task name and baseline1 from combined name
-            parts = task_baseline1_name.split(' ')
-            if len(parts) >= 3:  # "Test tasks SomeBaseline"
-                task_name = 'Test tasks'
-                baseline1_name = ' '.join(parts[2:])  # Everything after "Test tasks"
-                combined_task_name = f"Test tasks {baseline1_name}"
-            else:
-                combined_task_name = task_baseline1_name
-        else:
-            combined_task_name = task_baseline1_name
-        
-        # Build log key and metric key for baseline comparisons
-        # Use combined task name as the synthetic task
-        log_key = f"eval/{combined_task_name}"
-        if metric_type == 'RelErr':
-            metric_key = f"{baseline2_name} | True (RelErr)"
-        else:
-            metric_key = f"{baseline2_name} | True"
-        
-        return combined_task_name, baseline2_name, metric_key, log_key
-    
-    # If neither pattern matches, return None
-    return None
-"""
-
 @lru_cache(maxsize=1024)
 def parse_tensor_key(tensor_key: str) -> Optional[Tuple[str, str, str, str]]:
     """
     Parse keys of the form:
         {task}_{baseline1}_vs_{baseline2}_{metric}
-    with {metric} in {"MSE","RelErr"}.
+    with {metric} in {"MSE","RelErr", "MSE_Std", "RelErr_Std"}.
 
     Returns:
         (task_name, baseline2_name, metric_key, log_key) or None if invalid.
@@ -197,11 +87,22 @@ def parse_tensor_key(tensor_key: str) -> Optional[Tuple[str, str, str, str]]:
     elif tensor_key.endswith("_RelErr"):
         metric_type = "RelErr"
         base_key = tensor_key[:-7]
+    elif tensor_key.endswith("_MSE_Std"):
+        metric_type = "MSE_Std"
+        base_key = tensor_key[:-8]
+    elif tensor_key.endswith("_RelErr_Std"):
+        metric_type = "RelErr_Std"
+        base_key = tensor_key[:-11]
     else:
         return None
 
     def with_metric_suffix(s: str) -> str:
-        return s + (" (RelErr)" if metric_type == "RelErr" else "")
+        suffix = ""
+        if "RelErr" in metric_type:
+            suffix += " (RelErr)"
+        if "Std" in metric_type:
+            suffix += " (Std)"
+        return s + suffix
 
     def clean_task(name: str) -> str:
         # underscores → spaces, join consecutive integers "a b" → "a.b"
@@ -259,7 +160,8 @@ def filter_load_file(file_path):
     """
     tensors = load_file(file_path)
     # Filter out keys ending with 'Std'
-    filtered_tensors = {k: v for k, v in tensors.items() if not k.endswith('_Std')}
+    # filtered_tensors = {k: v for k, v in tensors.items() if not k.endswith('_Std')}
+    filtered_tensors = tensors
     return filtered_tensors
 
 
