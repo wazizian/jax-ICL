@@ -93,7 +93,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 label=f"{format_task_name_for_display(task_name, metric_name)}")
                         linestyle_idx += 1
                     else:
-                        print("Metric not relevant or data missing.")
+                        #print("Metric not relevant or data missing.")
+                        pass
                 color_idx += 1
             
             plt.xlabel("Context Length (Position)")
