@@ -74,7 +74,7 @@ def get_bsln_preds(train_task: Task, j_batch_samplers: dict[str, Sampler], n_sam
             preds[task_name][model_name] = []
         # Accumulate preds...
         for i in range(1, n_samples // batch_size + 1):
-            xs, ws, weights, ys, attention_mask = j_sample_batch(i)
+            xs, ws, weights, ys, attention_mask = j_sample_batch(i, evl=True)
             # print(f"Evaluating {task_name} batch {i} with {xs.shape[0]} samples and {ys.shape[1]} points ({xs.shape = }, {ws.shape = }, {ys.shape = })")
             n_points = ys.shape[2]
             target_shape = ys.shape[1:]  # (batch_size, n_points,) or (batch_size, n_points, n_dims)
@@ -101,7 +101,7 @@ def get_model_preds(
     for task_name, j_sample_batch in j_batch_samplers.items():
         preds[task_name] = {"Transformer": []}
         for i in range(1, n_samples // batch_size + 1):
-            xs, _, weights, ys, attention_mask = j_sample_batch(i)
+            xs, _, weights, ys, attention_mask = j_sample_batch(i, evl=True)
             n_points = ys.shape[2]
             target_shape = ys.shape[1:]  # (batch_size, n_points,) or (batch_size, n_points, n_dims)
             new_shape = (ys.shape[0] * ys.shape[1],) + target_shape[1:]  # (batch_size * n_devices, n_points,) or (batch_size * n_devices, n_points, n_dims)

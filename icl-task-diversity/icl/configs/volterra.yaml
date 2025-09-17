@@ -22,10 +22,10 @@ task:
   eval_ridge: false
   distrib_name: student
   distrib_param: .inf
-  ou_step: 0.8
+  ou_step: 0.5
   hidden_size: 16          # Ending hidden size
   kernel_exponent: 1.   # Exponent for RBF kernel
-  inner_steps: 1  # DO NOT USE, eval is broken for inner_steps > 1
+  inner_steps: 10 
 
 
   # Extended Curriculum Learning Configuration
@@ -89,5 +89,5 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      training.lr: 1e-4, 2e-4, 1e-3
-      task.kernel_exponent: 1., 1.5, 2.0
+      #training.lr: 1e-4, 2e-4, 1e-3
+      #task.kernel_exponent: 1., 1.5, 2.0

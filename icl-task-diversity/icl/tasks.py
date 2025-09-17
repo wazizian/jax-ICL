@@ -418,7 +418,7 @@ class NoisyLinearRegression:
         if self.n_points > old_n_points:
             logging.info(f"Curriculum increment: n_points {old_n_points} -> {self.n_points}")
 
-    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+    def sample_batch(self, step: int, evl=False) -> tuple[Array, Array, Array, Array]:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
             self.curriculum_increment()
         data, (tasks, weights) = self.sample_data(step), self.sample_tasks(step)
@@ -788,7 +788,7 @@ class OrnsteinUhlenbeckTask:
         if self.n_points > old_n_points:
             logging.info(f"Curriculum increment: n_points {old_n_points} -> {self.n_points}")
 
-    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+    def sample_batch(self, step: int, evl=False) -> tuple[Array, Array, Array, Array]:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
             self.curriculum_increment()
 
@@ -1408,7 +1408,7 @@ class MLPSDETask:
         if changes:
             logging.info(f"Curriculum increment: {', '.join(changes)}")
 
-    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+    def sample_batch(self, step: int, evl=False) -> tuple[Array, Array, Array, Array]:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
             self.curriculum_increment()
 
@@ -1797,8 +1797,10 @@ class VolterraTask:
             chex.assert_shape(drift_full, (self.max_n_dims,))
 
             # Normalize drift to prevent explosion
-            drift_full = jnp.clip(drift_full, -5.0, 5.0)  # Clip to prevent extreme drift values
-            drift_full = drift_full + 0.01 * x_padded  # Add small linear term for stability
+            drift_full = 10.0 * drift_full
+            clip_thresh = 1.5
+            drift_full = jnp.clip(drift_full, -clip_thresh,clip_thresh) 
+            drift_full = drift_full + 0.1 * x_padded  # Add small linear term for stability
             
             # Apply output dimension mask and truncate to current dimensions
             drift_current = drift_full[:n_dims_actual]  # (n_dims_actual,)
@@ -1916,8 +1918,8 @@ class VolterraTask:
         
         return tasks, weights
 
-    @jax.jit
-    def evaluate(self, tasks: Array, step: int) -> Array:
+    @partial(jax.jit, static_argnames=('evl',))
+    def evaluate(self, tasks: Array, step: int, evl=False) -> Array:
         """
         **CRITICAL CHANGE**: Use MLP drift instead of linear OU drift.
         """
@@ -2002,7 +2004,7 @@ class VolterraTask:
         # Note all_changes_init[self.n_points, :, :] is unused
         all_changes_init = all_changes_init.at[1:n_points_loop, :, :].set(all_noise[1:, :, :])
 
-        init_change = compute_change(init, all_changes_init[0, :, :])
+        init_change = compute_change(init, all_noise[0, :, :])
         chex.assert_shape(init_change, (self.batch_size, self.current_n_dims))
 
         all_changes_init = all_changes_init.at[0, :, :].set(init_change)
@@ -2010,12 +2012,23 @@ class VolterraTask:
         _, sde_steps = jax.lax.scan(mlp_sde_step, all_changes_init, indices[:-1])
         chex.assert_shape(sde_steps, (n_points_loop, self.batch_size, self.current_n_dims))
 
+        if evl:
+            target_sde_steps = sde_steps - all_noise * jnp.sqrt(ou_step)
+        else:
+            target_sde_steps = sde_steps
+
         # Downsample to original n_points
         sde_steps = sde_steps[self.inner_steps-1::self.inner_steps, :, :]  # Shape: (n_points, batch_size, current_n_dims)
         chex.assert_shape(sde_steps, (self.n_points, self.batch_size, self.current_n_dims))
 
+        target_sde_steps = target_sde_steps[self.inner_steps-1::self.inner_steps, :, :]
+        chex.assert_shape(target_sde_steps, (self.n_points, self.batch_size, self.current_n_dims))
+
         sde_steps = jnp.transpose(sde_steps, (1, 0, 2))  # Shape: (batch_size, n_points, current_n_dims)
         chex.assert_shape(sde_steps, (self.batch_size, self.n_points, self.current_n_dims))
+
+        target_sde_steps = jnp.transpose(target_sde_steps, (1, 0, 2))
+        chex.assert_shape(target_sde_steps, (self.batch_size, self.n_points, self.current_n_dims))
 
         # Final assertions on return values using current curriculum dimensions
         init_bs, init_dims = init.shape
@@ -2035,7 +2048,10 @@ class VolterraTask:
         new_sde_steps = jnp.concatenate([sde_steps, jnp.zeros((self.batch_size, self.n_points, self.max_n_dims - self.current_n_dims), dtype=sde_steps.dtype)], axis=2)
         chex.assert_shape(new_sde_steps, (self.batch_size, self.n_points, self.max_n_dims))
 
-        return new_init, new_sde_steps
+        new_target_sde_steps = jnp.concatenate([target_sde_steps, jnp.zeros((self.batch_size, self.n_points, self.max_n_dims - self.current_n_dims), dtype=target_sde_steps.dtype)], axis=2)
+        chex.assert_shape(new_target_sde_steps, (self.batch_size, self.n_points, self.max_n_dims))
+
+        return new_init, new_sde_steps, new_target_sde_steps
 
     @jax.jit
     def generate_attention_mask(self) -> Array:
@@ -2092,7 +2108,7 @@ class VolterraTask:
         if changes:
             logging.info(f"Curriculum increment: {', '.join(changes)}")
 
-    def sample_batch(self, step: int) -> tuple[Array, Array, Array, Array]:
+    def sample_batch(self, step: int, evl=False) -> tuple[Array, Array, Array, Array]:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
             self.curriculum_increment()
 
@@ -2100,11 +2116,12 @@ class VolterraTask:
         chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
         chex.assert_shape(weights, (self.batch_size, 1))
 
-        init, targets = self.evaluate(tasks, step)
+        init, sde_steps, targets = self.evaluate(tasks, step, evl=evl)
         chex.assert_shape(init, (self.batch_size, self.max_n_dims))
+        chex.assert_shape(sde_steps, (self.batch_size, self.n_points, self.max_n_dims))
         chex.assert_shape(targets, (self.batch_size, self.n_points, self.max_n_dims))
 
-        data = jnp.concatenate((init[:, None, :], targets[:, :-1, :]), axis=1)
+        data = jnp.concatenate((init[:, None, :], sde_steps[:, :-1, :]), axis=1)
         chex.assert_shape(data, (self.batch_size, self.n_points, self.max_n_dims))
 
         attention_mask = self.generate_attention_mask()
@@ -2115,7 +2132,51 @@ class VolterraTask:
     @jax.jit
     def evaluate_oracle(self, data: Array, tasks: Array, targets) -> Array:
         """Oracle prediction using MLP drift."""
-        return targets
+        # TODO: make more  precise
+        corrected_targets = targets
+        return corrected_targets
+        # Identify actual dimensions from input (should match current curriculum dimensions)
+
+        batch_size_actual, n_points_actual, n_dims_actual = data.shape
+        chex.assert_shape(data, (batch_size_actual, n_points_actual, n_dims_actual))
+        chex.assert_equal(n_dims_actual, self.max_n_dims)  # Data should always be padded to max_n_dims
+
+        task_bs_actual, task_n_dims_actual, one_dim = tasks.shape
+        chex.assert_shape(tasks, (task_bs_actual, task_n_dims_actual, one_dim))
+        chex.assert_equal(one_dim, 1)
+
+        mlp_params = self.get_params_from_tasks(tasks)
+        prev_states = data 
+        chex.assert_shape(prev_states, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        # Oracle: apply MLP drift with curriculum masking
+        drift = self.apply_mlp_drift(prev_states, mlp_params)
+        chex.assert_shape(drift, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        drift = drift * self.ou_step
+
+        t = jnp.arange(n_points_actual)[:, None]
+        s = jnp.arange(n_points_actual)[None, :]
+        assert n_points_actual == self.n_points
+        total_time = 1 #n_points_actual * self.ou_step
+        g_coefs = jnp.where(s <= t, (t / total_time - s /total_time + 1) ** (-self.kernel_exponent), 0.0)
+        chex.assert_shape(g_coefs, (n_points_actual, n_points_actual))
+
+        change = jnp.einsum('ts,bsd->btd', g_coefs, drift)
+        chex.assert_shape(change, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        oracle_states = prev_states + change
+        chex.assert_shape(oracle_states, (batch_size_actual, n_points_actual, n_dims_actual))
+
+        # Final assertion on return value
+        oracle_bs, oracle_points, oracle_dims = oracle_states.shape
+        chex.assert_shape(oracle_states, (oracle_bs, oracle_points, oracle_dims))
+        chex.assert_equal(oracle_bs, batch_size_actual)
+        chex.assert_equal(oracle_points, n_points_actual)
+        chex.assert_equal(oracle_dims, n_dims_actual)
+
+        return oracle_states
+
 
     def get_default_eval_tasks(
             self, batch_size: int, task_seed: int, data_seed: int, noise_seed: int, eval_n_points: List[int], task_centers: List[float] | None = None, **kwargs

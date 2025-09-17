@@ -47,8 +47,8 @@ def initialize(model: Transformer | SingleSeqTransformer, config: ConfigDict) ->
 def get_sharded_batch_sampler(task: Task) -> Sampler:
     n_devices = jax.local_device_count()
 
-    def sample_batch(step: int) -> tuple[Array, Array, Array, Array, Array]:
-        data, tasks, weights, targets, attention_mask = task.sample_batch(step)
+    def sample_batch(step: int, evl=False) -> tuple[Array, Array, Array, Array, Array]:
+        data, tasks, weights, targets, attention_mask = task.sample_batch(step, evl=evl)
         batch_size = data.shape[0]
         batch_per_device = batch_size // n_devices
         
