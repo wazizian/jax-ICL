@@ -26,8 +26,8 @@ task:
   hidden_size: 16          # Ending hidden size
   kernel_exponent: 1.   # Exponent for RBF kernel
   inner_steps: 8 
-  drift_scale: 100.0 #10.
-  drift_clip: 1000.0 #1.5
+  drift_scale: 10.0 #10.
+  drift_clip: 100.0 #1.5
   drift_reg: 0.001 #0.1
 
   # Extended Curriculum Learning Configuration
