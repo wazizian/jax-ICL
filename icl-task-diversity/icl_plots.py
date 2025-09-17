@@ -76,9 +76,9 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             for task_name, metrics in eval_metrics.items():
                 linestyle_idx = 0
                 for metric_name, values in metrics.items():
-                    print(f"Processing {task_name} - {metric_name}...", end=" ")
+                    # print(f"Processing {task_name} - {metric_name}...", end=" ")
                     if f" | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and "(Std)" not in metric_name and values and step_idx < len(values):
-                        print("Found relevant metric.")
+                        # print("Found relevant metric.")
                         # Get MSE by position for this step
                         mse_by_position = normalize_error_values(values[step_idx])  # List of MSE values by position
                         n_points = len(mse_by_position)
@@ -101,7 +101,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             plt.title(f"ICL MSE vs {baseline_type} Baseline at Step {eval_step} - {run_id}")
             plt.grid(True, alpha=0.3)
             plt.yscale('log')
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            #plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            plt.legend(loc='lower left', bbox_to_anchor=(0, 1), fontsize='small')
             plt.tight_layout()
             
             # Save MSE plot for this step
@@ -115,7 +116,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             
             for task_name, metrics in eval_metrics.items():
                 for metric_name, values in metrics.items():
-                    if f"Transformer | {baseline_type} (RelErr)" in metric_name and values and step_idx < len(values):
+                    if f"Transformer | {baseline_type} (RelErr)" in metric_name and values and step_idx < len(values)  and "(Std)" not in metric_name:
                         # Get Relative Error by position for this step
                         rel_err_by_position = normalize_error_values(values[step_idx])  # List of RelErr values by position
                         n_points = len(rel_err_by_position)
