@@ -1644,6 +1644,9 @@ class VolterraTask:
     data_noise_trunc_radius: float = 10  # Truncation radius Gaussian noise for Volterra SDE
     kernel_exponent: float = 1.
     inner_steps:int = 10  # Number of inner steps for Volterra SDE
+    drift_scale: float = 10.0
+    drift_clip: float = 1.5
+    drift_reg: float = 0.1  # Reference value for drift normalization
 
     
     # Extended curriculum learning parameters - use defaults that match base parameters
@@ -1797,10 +1800,10 @@ class VolterraTask:
             chex.assert_shape(drift_full, (self.max_n_dims,))
 
             # Normalize drift to prevent explosion
-            drift_full = 10.0 * drift_full
-            clip_thresh = 1.5
+            drift_full = self.drift_scale * drift_full
+            clip_thresh = self.drift_clip
             drift_full = jnp.clip(drift_full, -clip_thresh,clip_thresh) 
-            drift_full = drift_full + 0.1 * x_padded  # Add small linear term for stability
+            drift_full = drift_full + self.drift_reg * x_padded  # Add small linear term for stability
             
             # Apply output dimension mask and truncate to current dimensions
             drift_current = drift_full[:n_dims_actual]  # (n_dims_actual,)
@@ -2293,6 +2296,9 @@ class VolterraTask:
             'data_noise_trunc_radius': self.data_noise_trunc_radius,
             'kernel_exponent': self.kernel_exponent,
             'inner_steps': self.inner_steps,
+            'drift_scale': self.drift_scale,
+            'drift_clip': self.drift_clip,
+            'drift_reg': self.drift_reg,
         }
         
         return (children, aux_data)
