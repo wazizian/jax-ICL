@@ -76,7 +76,9 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             for task_name, metrics in eval_metrics.items():
                 linestyle_idx = 0
                 for metric_name, values in metrics.items():
+                    print(f"Processing {task_name} - {metric_name}...", end=" ")
                     if f" | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and "(Std)" not in metric_name and values and step_idx < len(values):
+                        print("Found relevant metric.")
                         # Get MSE by position for this step
                         mse_by_position = normalize_error_values(values[step_idx])  # List of MSE values by position
                         n_points = len(mse_by_position)
@@ -90,6 +92,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 linestyle=linestyles[linestyle_idx % len(linestyles)],
                                 label=f"{format_task_name_for_display(task_name, metric_name)}")
                         linestyle_idx += 1
+                    else:
+                        print("Metric not relevant or data missing.")
                 color_idx += 1
             
             plt.xlabel("Context Length (Position)")
