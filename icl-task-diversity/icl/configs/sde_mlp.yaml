@@ -9,7 +9,7 @@ task:
   n_data: 0
   n_dims: 4               # Ending dimensions (will grow to max_n_dims)
   n_points: 16            # Starting n_points (will grow with curriculum)
-  n_max_points: 64        # Ending n_points (should match model n_points)
+  n_max_points: 32        # Ending n_points (should match model n_points)
   batch_size: 256
   data_seed: 101
   task_seed: 102
@@ -42,7 +42,7 @@ task:
 
 model:
   name: single_seq_transformer
-  n_points: 64
+  n_points: 32
   n_layer: 8
   n_embd: 128
   n_head: 2
@@ -56,7 +56,7 @@ training:
   lr: 1.0e-3
   schedule: warmup_cosine_decay
   warmup_steps: 50_000
-  total_steps: 400_000
+  total_steps: 200_000
   weight_decay: 0.1
   clip_max_norm: null
 
@@ -66,8 +66,8 @@ eval:
   data_seed: 104
   task_seed: 105
   noise_seed: 106
-  every: 20_000
-  eval_n_points: 64
+  every: 50_000
+  eval_n_points: 32
   task_centers:
     - 0.0
     - 0.1
@@ -84,5 +84,6 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      training.lr: 1e-4
+      add_seed: 1, 2, 3
+      training.lr: 2e-4, 1e-3 
       task.distrib_param: inf, 3.0, 5.0
