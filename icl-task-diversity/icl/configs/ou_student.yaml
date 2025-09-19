@@ -87,4 +87,4 @@ hydra:
       add_seed: 1, 2, 3
       # When launching, do not launch 3 + use_weights true
       task.distrib_param: inf, 3.0, 5.0, 10.0
-      training.lr: 1e-3, 1e-4
+      training.lr: 1e-3, 2e-3
