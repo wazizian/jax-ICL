@@ -18,8 +18,9 @@ task:
   noise_scale: 0.5
   clip: null
   use_weights: false
-  distrib_name: generalized_normal
-  distrib_param: 2
+  distrib_name: student
+  distrib_param: .inf
+  fixed_support: true
 
 model:
   name: transformer
@@ -63,6 +64,6 @@ hydra:
     subdir: ${hydra.job.num}
   sweeper:
     params:
-      task.distrib_param: 1.0, 1.5
-      training.weight_decay: 0.0, 0.01
-      training.lr: 1e-4, 1e-3
+      task.distrib_param: inf
+      training.weight_decay: 0.01
+      training.lr: 1e-3

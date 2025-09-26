@@ -102,29 +102,38 @@ def sample_distrib(
         distrib_name: str,
         distrib_param: float | None,
         shape: tuple[int, ...],
-        dtype: Any = jnp.float32
+        dtype: Any = jnp.float32,
+        fixed_support: bool = False,
+        ref_distrib_name: str = "student",
+        ref_distrib_param: float = 3.0,
         ) -> Array:
     """Dispatch to appropriate sampling function based on distribution name."""
-    if distrib_name == "normal" or (distrib_name == "student" and distrib_param == float("inf")):
-        # jax.debug.print("Sampling from normal distribution with loc {}, scale {}, clip {}", loc, scale, clip)
-        return sample_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
-    elif distrib_name == "student":
-        # jax.debug.print("Sampling from student-t distribution with loc {}, scale {}, df {}, clip {}", loc, scale, distrib_param, clip)
-        if distrib_param is None:
-            raise ValueError("distrib_param (degrees of freedom) must be specified for student-t distribution")
-        if clip is None:
-            return sample_student_t(key, loc, scale, distrib_param, shape, dtype)
+    if not fixed_support:
+        if distrib_name == "normal" or (distrib_name == "student" and distrib_param == float("inf")):
+            # jax.debug.print("Sampling from normal distribution with loc {}, scale {}, clip {}", loc, scale, clip)
+            return sample_multivariate_gaussian(key, loc, scale, clip, shape, dtype)
+        elif distrib_name == "student":
+            # jax.debug.print("Sampling from student-t distribution with loc {}, scale {}, df {}, clip {}", loc, scale, distrib_param, clip)
+            if distrib_param is None:
+                raise ValueError("distrib_param (degrees of freedom) must be specified for student-t distribution")
+            if clip is None:
+                return sample_student_t(key, loc, scale, distrib_param, shape, dtype)
+            else:
+                return sample_truncated_student(key, loc, scale, distrib_param, clip, shape, dtype)
+        elif distrib_name == "generalized_normal":
+            # jax.debug.print("Sampling from generalized normal distribution with loc {}, scale {}, beta {}", loc, scale, distrib_param)
+            if distrib_param is None:
+                raise ValueError("distrib_param (shape parameter) must be specified for generalized normal distribution")
+            if clip is not None:
+                raise NotImplementedError("Clipping not implemented for generalized normal distribution")
+            return sample_generalized_normal(key, loc, scale, distrib_param, shape, dtype)
         else:
-            return sample_truncated_student(key, loc, scale, distrib_param, clip, shape, dtype)
-    elif distrib_name == "generalized_normal":
-        # jax.debug.print("Sampling from generalized normal distribution with loc {}, scale {}, beta {}", loc, scale, distrib_param)
-        if distrib_param is None:
-            raise ValueError("distrib_param (shape parameter) must be specified for generalized normal distribution")
-        if clip is not None:
-            raise NotImplementedError("Clipping not implemented for generalized normal distribution")
-        return sample_generalized_normal(key, loc, scale, distrib_param, shape, dtype)
+            raise ValueError(f"Unknown distribution name: {distrib_name}")
     else:
-        raise ValueError(f"Unknown distribution name: {distrib_name}")
+        return sample_distrib(
+            key, loc, scale, clip, ref_distrib_name, ref_distrib_param, shape, dtype, fixed_support=False
+            )
+
 
 #@partial(jax.jit, static_argnames=("clip",))
 def aux_task_log_weights(
@@ -199,16 +208,27 @@ def task_log_weights(
         ref_distrib_name: str = "student",
         ref_distrib_param: float = 3.0,
         use_weights: bool = False,
-        reduce_axis: int = -1
+        reduce_axis: int = -1,
+        fixed_support: bool = False,
         ) -> Array:
-    res = jnp.clip(
-        #aux_task_log_weights(
-         #  tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
-         #   ) \
-        - aux_task_log_weights(
-            tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
-            ),
-        0, None)
+    if not fixed_support:
+        res = jnp.clip(
+            #aux_task_log_weights(
+             #  tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights, reduce_axis
+             #   ) \
+            - aux_task_log_weights(
+                tasks, loc, scale, clip, distrib_name, distrib_param, use_weights, reduce_axis
+                ),
+            0, None)
+    else:
+        res = (
+            aux_task_log_weights(
+                tasks, loc, scale, clip, distrib_name, distrib_param, use_weights=True, reduce_axis=reduce_axis
+                ) 
+            - aux_task_log_weights(
+                tasks, loc, scale, clip, ref_distrib_name, ref_distrib_param, use_weights=True, reduce_axis=reduce_axis
+                )
+            )
     return res
 
 
@@ -286,6 +306,7 @@ class NoisyLinearRegression:
     curriculum_n_points_increment: int = 2  # Increment for curriculum learning
     curriculum_steps_thresh: int = 2_000  # Steps after which to increment n_points in curriculum learning
     _skip_init: bool = False  # Private parameter to skip __post_init__ logic
+    fixed_support: bool = False  # Whether to use fixed support for task weights
 
 
     def __post_init__(self):
@@ -315,7 +336,7 @@ class NoisyLinearRegression:
         key = jax.random.fold_in(self.task_key, 0)
         shape = self.n_tasks, self.n_dims, 1
         tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
-                              self.distrib_name, self.distrib_param, shape, self.dtype)
+                              self.distrib_name, self.distrib_param, shape, self.dtype, fixed_support=self.fixed_support)
 
         log_weights = task_log_weights(
                 tasks,
@@ -325,7 +346,8 @@ class NoisyLinearRegression:
                 self.distrib_name,
                 self.distrib_param,
                 use_weights=self.use_weights,
-                reduce_axis=1
+                reduce_axis=1,
+                fixed_support=self.fixed_support
                 )
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
@@ -357,7 +379,7 @@ class NoisyLinearRegression:
             tasks = self.task_pool[idxs]
             # log_weights = self.weights[idxs] 
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1)
+                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1, fixed_support=self.fixed_support)
             #weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.n_dims, 1
@@ -371,7 +393,8 @@ class NoisyLinearRegression:
                     self.distrib_name,
                     self.distrib_param,
                     use_weights=self.use_weights,
-                    reduce_axis=1
+                    reduce_axis=1,
+                    fixed_support=self.fixed_support
                     )
             #weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         weights = log_weights
@@ -422,6 +445,7 @@ class NoisyLinearRegression:
         if step % self.curriculum_steps_thresh == self.curriculum_steps_thresh - 1 and self.use_curriculum:
             self.curriculum_increment()
         data, (tasks, weights) = self.sample_data(step), self.sample_tasks(step)
+        # print(f"Evl={evl}, weights: {weights}") 
         targets = self.evaluate(data, tasks, step)
         attention_mask = self.generate_attention_mask()
         return data, tasks, weights, targets, attention_mask
@@ -470,6 +494,7 @@ class NoisyLinearRegression:
         # Test with fixed task centers
         if task_centers is not None:
             config["distrib_name"] = "normal"  # Reset to normal distribution for fixed tasks
+            config["fixed_support"] = False 
             for task_center in task_centers:
                 config["task_center"] = task_center
                 # config["task_scale"] = 0.
@@ -522,6 +547,7 @@ class NoisyLinearRegression:
             'use_curriculum': self.use_curriculum,
             'curriculum_n_points_increment': self.curriculum_n_points_increment,
             'curriculum_steps_thresh': self.curriculum_steps_thresh,
+            'fixed_support': self.fixed_support,
         }
         
         return (children, aux_data)
@@ -619,6 +645,7 @@ class OrnsteinUhlenbeckTask:
     ou_step: float = 1e-2
     task_n_dims: int | None = None  # Automatically set to 2*n_dims in __post_init__
     _skip_init: bool = False  # Private parameter to skip __post_init__ logic
+    fixed_support: bool = False  # Whether to use fixed support for task weights
 
 
     def __post_init__(self):
@@ -664,10 +691,10 @@ class OrnsteinUhlenbeckTask:
         key = jax.random.fold_in(self.task_key, 0)
         shape = self.n_tasks, self.task_n_dims, 1
         tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
-                              self.distrib_name, self.distrib_param, shape, self.dtype)
+                              self.distrib_name, self.distrib_param, shape, self.dtype, fixed_support=self.fixed_support)
 
         log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                     self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+                                     self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1, fixed_support=self.fixed_support)
         #weights = jax.nn.softmax(log_weights, axis=0)
         weights = log_weights
         # jax.debug.print("Tasks: {tasks}", tasks=tasks)
@@ -706,15 +733,15 @@ class OrnsteinUhlenbeckTask:
                 # log_weights = self.weights[idxs] 
                 tasks = self.task_pool[idxs]
                 log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                             self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+                                             self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1, fixed_support=self.fixed_support)
                 # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
             # jax.debug.print("Sampled indices for tasks: {}", idxs)
         else:
             shape = self.batch_size, self.task_n_dims, 1
             tasks = sample_distrib(key, self.task_center, self.task_scale, self.clip, 
-                                 self.distrib_name, self.distrib_param, shape, self.dtype)
+                                 self.distrib_name, self.distrib_param, shape, self.dtype, fixed_support=self.fixed_support)
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1)
+                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1, fixed_support=self.fixed_support)
             # weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         weights = log_weights
         chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
@@ -796,6 +823,8 @@ class OrnsteinUhlenbeckTask:
         chex.assert_shape(tasks, (self.batch_size, self.task_n_dims, 1))
         chex.assert_shape(weights, (self.batch_size, 1))
 
+        #print(f"Evl={evl}, Weights: {weights}")
+
         init, targets = self.evaluate(tasks, step)
         chex.assert_shape(init, (self.batch_size, self.n_dims))
         chex.assert_shape(targets, (self.batch_size, self.n_points, self.n_dims))
@@ -875,6 +904,7 @@ class OrnsteinUhlenbeckTask:
         # Test with fixed task centers
         if task_centers is not None:
             config["distrib_name"] = "normal"  # Reset to normal distribution for fixed tasks
+            config["fixed_support"] = False
             for task_center in task_centers:
                 # Increment seeds
                 config["task_seed"] += 1
@@ -931,6 +961,7 @@ class OrnsteinUhlenbeckTask:
             'curriculum_steps_thresh': self.curriculum_steps_thresh,
             'ou_step': self.ou_step,
             'task_n_dims': self.task_n_dims,
+            'fixed_support': self.fixed_support,
         }
         
         return (children, aux_data)
