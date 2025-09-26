@@ -1,25 +1,32 @@
-# Pretraining task diversity and the emergence of non-Bayesian in-context learning for regression
-
-Code for [Pretraining task diversity and the emergence of non-Bayesian in-context learning for regression
-](https://arxiv.org/abs/2306.15063)
-
-**Research supported with Cloud TPUs from Google's TPU Research Cloud (TRC)**
-
-All experiments were run on TPUs using the Google TPU Research Cloud. 
-Apply for TPU access at https://sites.research.google/trc/about/. 
-
-After provisioning a TPU VM, create a Python virtual environment using:
-```sh
-conda create -n icl -y python=3.10
-conda activate icl
+# How does the pretraining distribution shape in-context learning?
+This repository is based on the implementation of the paper 
 ```
-and install dependencies using
+Raventós, A., Paul, M., Chen, F., & Ganguli, S. (2023). Pretraining task diversity and the emergence of non-bayesian in-context learning for regression. Advances in neural information processing systems, 36, 14228-14246.
+```
+and was extended for our purposes.
+
+To run the code, first install the dependencies:
+
 ```sh
 pip install -r requirements.txt
-pip install -e .
 ```
 
-To train a model, modify `icl/configs/example.py` and then run:
+To run an experiment, use the following command:
 ```sh
-python run.py --config=icl/configs/example.py
+python run.py --config-name=icl/configs/generalization_student.yaml
 ```
+
+The configuration files are located in the `icl/configs` folder. The config files to reproduce the linear regression experiments are:
+- `generalization_student.yaml`: Generalization experiments for linear regression with student prior.
+- `generalization_gen.yaml`: Generalization experiments for linear regression with generalized normal prior.
+- `reweighting_student.yaml`: Reweighting experiments for linear regression with student prior.
+- `reweighting_gen.yaml`: Reweighting experiments for linear regression with generalized normal prior.
+- `variance.yaml`: Reweighting experiments for linear regression with generalized normal prior and variance analysis. 
+
+The config files to reproduce the OU experiments are:
+- `ou_student.yaml`: OU experiments for student prior.
+- `ou_gen.yaml`: OU experiments for generalized normal prior.
+
+The config file to reproduce the Volterra experiments is: `volterra.yaml`.
+
+
