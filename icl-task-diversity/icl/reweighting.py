@@ -184,7 +184,8 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     weights_hard = soft_hard_clip(weights_soft)
     
     # 4. Renormalize to sum to 1
-    weights_final = renormalize_weights(weights_hard)
+    # weights_final = renormalize_weights(weights_hard)
+    weigths_final = jnp.exp(weights_hard)
     
     # 5. Compute diagnostics
     original_weights = renormalize_weights(log_weights) 
