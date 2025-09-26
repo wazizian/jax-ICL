@@ -17,7 +17,7 @@ task:
   task_scale: 1.0
   noise_scale: 0.5
   clip: null
-  use_weights: false
+  use_weights: true
   distrib_name: student
   distrib_param: .inf
   fixed_support: true
@@ -39,6 +39,7 @@ training:
   warmup_steps: 10
   total_steps: 20
   weight_decay: 0.01
+  normalize_weights: false
 
 eval:
   n_samples: 16

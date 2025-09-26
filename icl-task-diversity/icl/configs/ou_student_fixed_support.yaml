@@ -46,6 +46,7 @@ training:
   total_steps: 500_000
   weight_decay: 0.1
   clip_max_norm: null 
+  normalize_weights: false
 
 eval:
   n_samples: 2048

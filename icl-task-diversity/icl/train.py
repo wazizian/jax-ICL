@@ -81,7 +81,8 @@ def train_step(state: TrainState,
                alpha0: float,
                T_ramp_ratio: float,
                use_weights:bool,
-               clip_max_norm: float
+               clip_max_norm: float,
+               normalize:bool,
                ) -> tuple[Array, TrainState]:
 
     dropout_rng = jr.fold_in(dropout_rng, state.step + 1)
@@ -90,7 +91,7 @@ def train_step(state: TrainState,
         log_weights = jnp.zeros(data.shape[0], dtype=jnp.float32)
 
     weights, diagnostics = process_log_weights(
-        log_weights, t, T, alpha0=alpha0, T_ramp_ratio=T_ramp_ratio
+        log_weights, t, T, alpha0=alpha0, T_ramp_ratio=T_ramp_ratio, normalize=normalize
         )
 
     def loss_fn(params, weights):
@@ -216,14 +217,14 @@ def train(config: ConfigDict) -> None:
             axis_name="device",
             donate_argnums=0,
             # Static args: T, alpha0, T_ramp_ratio, use_weights, clip_max_norm
-            static_broadcasted_argnums=(7, 8, 9, 10, 11)
+            static_broadcasted_argnums=(7, 8, 9, 10, 11, 12)
             )
     p_eval_step = jax.pmap(eval_step, axis_name="device")
     logging.info("Pmap'd Steps")
 
     use_weights = config.task.use_weights
     alpha0 = config.training.get("alpha0", 0.5)
-    T_ramp_ratio = config.training.get("T_ramp_ratio", 0.4)
+    T_ramp_ratio = config.training.get("T_ramp_ratio", 0.)
 
     # Create eval results directory
     eval_results_dir = exp_dir / "eval_results"
@@ -325,7 +326,8 @@ def train(config: ConfigDict) -> None:
                     alpha0,
                     T_ramp_ratio,
                     use_weights,
-                    clip_max_norm
+                    clip_max_norm,
+                    config.training.normalize_weights
                     )
                 )
         loss = jax_utils.unreplicate(loss)

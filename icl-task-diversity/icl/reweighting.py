@@ -152,8 +152,8 @@ def compute_diagnostics(weights: Array) -> Dict[str, Any]:
     
     return diagnostics
 
-@partial(jax.jit, static_argnames=["T","T_ramp_ratio"])
-def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5, 
+@partial(jax.jit, static_argnames=["T","T_ramp_ratio", "normalize"])
+def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5, normalize=False,
                        T_ramp_ratio: float = 0.4) -> tuple[Array, Dict[str, Any]]:
     """
     Main function to process log weights with soft clipping, hard clipping, and renormalization.
@@ -184,8 +184,10 @@ def process_log_weights(log_weights: Array, t: int, T: int, alpha0: float = 0.5,
     weights_hard = soft_hard_clip(weights_soft)
     
     # 4. Renormalize to sum to 1
-    # weights_final = renormalize_weights(weights_hard)
-    weigths_final = jnp.exp(weights_hard)
+    if normalize:
+        weights_final = renormalize_weights(weights_hard)
+    else:
+        weights_final = jnp.exp(weights_hard) / len(weights_hard)
     
     # 5. Compute diagnostics
     original_weights = renormalize_weights(log_weights) 
