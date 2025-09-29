@@ -347,6 +347,7 @@ def group_runs_by_other_params(run_data: list, optimize_params: list, all_swept_
         groups[other_key].append(run)
 
     for other_key, runs in groups.items():
+        print(f"Grouping {len(runs)} runs for other params: {other_key}")
         new_group = {}
         for run in runs:
             # create tuple of "optimize" parameter values for grouping
@@ -358,6 +359,8 @@ def group_runs_by_other_params(run_data: list, optimize_params: list, all_swept_
             if optimize_key not in new_group:
                 new_group[optimize_key] = []
             new_group[optimize_key].append(run)
+        for optimize_key, runs in new_group.items():
+            print(f"  Optimize params: {optimize_key} with {len(runs)} runs")
         groups[other_key] = average_over_seed(new_group)
 
     return groups
@@ -391,17 +394,19 @@ def average_over_seed(run_groups: dict) -> list:
         return jnp.exp(jnp.std(log_a, axis=axis))
     def std_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
-            return args[0]
+            ret = args[0]
         elif isinstance(args[0], (int, float)):
-            return gstd(jnp.array(args))
+            ret = gstd(jnp.array(args))
         elif isinstance(args[0], list):
             new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
-            return gstd(new_args, axis=0).tolist()
+            ret = gstd(new_args, axis=0).tolist()
         elif isinstance(args[0],jax.Array):
             new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
-            return gstd(new_args, axis=0)
+            ret =  gstd(new_args, axis=0)
         else:
             raise ValueError(f"Unsupported type for std computation: {type(args[0])}")
+        # print(f"std_func: {args} -> {ret}") 
+        return ret
 
     new_runs = []
     for optimize_key, runs in run_groups.items():
@@ -413,7 +418,6 @@ def average_over_seed(run_groups: dict) -> list:
                 new_dict = {}
                 for metric_name in log[key].keys():
                     if "Std" not in metric_name and f"{metric_name}_Std" not in log[key]:
-                        print(f"Updating metric {key}/{metric_name} with std at {key}/{metric_name}_Std")
                         std_values = std_res['log'][key][metric_name]
                         new_dict[f"{metric_name}_Std"] = std_values
                 log[key].update(new_dict)

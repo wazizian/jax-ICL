@@ -15,7 +15,10 @@ def pretty_task_label(task_name: str) -> str:
 
 def method_from_metric(metric_name: str) -> str:
     # "Transformer | Ridge" -> "Transformer"
-    return metric_name.split(" | ")[0].strip()
+    splitted = metric_name.split(" | ")[0].strip()
+    if splitted == "LastValue":
+        return "Last Value"
+    return splitted
 
 def format_task_name_for_display(task_name, metric_name):
     """Format task name for display in legends, replacing 'Fixed task' with 'Shifted task'."""
@@ -35,7 +38,7 @@ def plot_opt_icl_plots(run_paths: list, output_dir: Path = None, run_labels: lis
 
     for label in run_labels:
         log = all_logs[label]
-        plot_icl_for_all_steps(log, run_id=label, output_dir=output_dir)
+        plot_icl_for_all_steps(log, run_id=label, output_dir=run_paths[0])
 
 FONT_SIZE = 28
 
@@ -103,7 +106,12 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             if (f" | {baseline_type}" in mn) and ("(RelErr)" not in mn) and ("Std" not in mn) and ("True" not in method_from_metric(mn))
         })
 
-        linestyles_cycle = ['--', '-.', ':', '-']
+        #linestyles_cycle = ['--', '-.', ':', '-']
+        linestyles_cycle = [
+            (0, (1, 3)),         # dotted:  . . . . .
+            (0, (5, 5)),         # dashed:  ─ ─ ─ ─
+            "-",                 # solid:   ─────────
+        ]
         linestyles_cycle = linestyles_cycle[-len(all_methods):]  # ensure we have enough styles 
         method_to_style = {m: linestyles_cycle[i % len(linestyles_cycle)] for i, m in enumerate(all_methods)}
         # -------------------------------------------------------
@@ -133,8 +141,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                         positions = list(range(1, len(mse_by_position) + 1))
 
                         # ARMA burn-in handling (apply to both mean and std arrays)
-                        if "ARMA" in task_name:
-                            burn_in = 5
+                        if "ARMA" in metric_name:
+                            burn_in = 8
                             positions = positions[burn_in:]
                             mse_by_position = mse_by_position[burn_in:]
 

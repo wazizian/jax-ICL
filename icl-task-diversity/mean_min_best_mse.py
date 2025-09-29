@@ -529,9 +529,15 @@ def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
         return loaded_data
     
     actual_run_labels = []
+
+    FAST = True
     
     for i, run_path in enumerate(run_paths):
         run_path = Path(run_path)
+
+        if FAST and i > 3:
+            print("Fast mode: only loading first 4 runs")
+            break
         
         # Determine run label
         if run_labels and i < len(run_labels):
@@ -639,13 +645,15 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
         'metadata': {},
         'run_labels': []
     }
+
+    FAST = True
     
     actual_run_labels = []
 
     
     for i, run_path in enumerate(run_paths):
         run_path = Path(run_path)
-        
+
         # Determine run label
         if run_labels and i < len(run_labels):
             run_label = run_labels[i]
@@ -671,10 +679,13 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
             
             # Collect all run data
             all_runs = []
-            for subdir in subdirs:
+            for j, subdir in enumerate(subdirs):
                 config_path = subdir / "config.json"
                 if not config_path.exists():
                     continue
+                if FAST and j > 4:
+                    print("Fast mode: only loading first 5 subruns")
+                    break
                 
                 try:
                     with open(config_path, 'r') as f:
