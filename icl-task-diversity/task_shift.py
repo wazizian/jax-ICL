@@ -125,7 +125,7 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
         if task_name == "Test tasks" or task_name.startswith("Fixed task"):
             selected_metric = None
             for metric_name, values in metrics.items():
-                if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values is not None:
                     selected_metric = (metric_name, values)
                     break
             
@@ -224,7 +224,7 @@ def extract_power_law_params(log: dict) -> dict:
         fallback_metric = None
         
         for metric_name, values in metrics.items():
-            if "(RelErr)" not in metric_name and values:
+            if "(RelErr)" not in metric_name and values is not None:
                 if "Transformer | Ridge" in metric_name:
                     preferred_metric = (metric_name, values)
                 elif "Transformer | True" in metric_name:
@@ -370,50 +370,55 @@ def average_over_seed(run_groups: dict) -> list:
     import pathlib
 
     @eqx.filter_jit
-    def gmean(a, axis=None):
-        a =jnp.array(a)
-        log_a =jnp.log(a)
-        return jnp.exp(jnp.mean(log_a, axis=axis))
+    def mean(a, axis=None):
+        return jnp.mean(a, axis=axis)
+
+    @eqx.filter_jit
+    def mean_stack(args):
+        new_args =jnp.stack([a for a in args], axis=0)
+        return jnp.mean(new_args, axis=0)
+
     def avg_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
             print(f"Got string/path with {len(args)} args")
             return args[0]
         elif isinstance(args[0], (int, float)):
-            print(f"Got scalar with {len(args)} args")
-            return gmean(jnp.array(args))
+            #print(f"Got scalar with {len(args)} args")
+            return mean(jnp.array(args))
         elif isinstance(args[0], list):
             print(f"Got lists with {len(args[0])} elements and {len(args)} args")
-            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
-            return gmean(new_args, axis=0).tolist()
+            new_args = [jnp.array(a) for a in args]
+            return mean_stack(new_args)
         elif isinstance(args[0],jnp.ndarray):
             print(f"Got jax arrays with shape {args[0].shape} and {len(args)} args")
-            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
-            return gmean(new_args, axis=0)
+            return mean_stack(args)
         else:
             raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
     @eqx.filter_jit
-    def gstd(a, axis=None):
-        a =jnp.array(a)
-        log_a =jnp.log(a)
-        return jnp.exp(jnp.std(log_a, axis=axis))
+    def std(a, axis=None):
+        return jnp.std(a, axis=axis)
+    @eqx.filter_jit
+    def std_stack(args):
+        new_args =jnp.stack([a for a in args], axis=0)
+        return jnp.std(new_args, axis=0)
+
     def std_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
             ret = args[0]
         elif isinstance(args[0], (int, float)):
-            ret = gstd(jnp.array(args))
+            ret = std(jnp.array(args))
         elif isinstance(args[0], list):
-            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
-            ret = gstd(new_args, axis=0).tolist()
+            new_args = [jnp.array(a) for a in args]
+            ret =  std_stack(new_args)
         elif isinstance(args[0],jax.Array):
-            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
-            ret =  gstd(new_args, axis=0)
+            ret = std_stack(args)
         else:
             raise ValueError(f"Unsupported type for std computation: {type(args[0])}")
         # print(f"std_func: {args} -> {ret}") 
         return ret
 
     new_runs = []
-    FAST=True
+    FAST=False
     for optimize_key, runs in run_groups.items():
         if not FAST:
             res = jax.tree.map(avg_func, *[run for run in runs])

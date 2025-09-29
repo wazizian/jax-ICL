@@ -590,6 +590,7 @@ def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
                     
                 except Exception as e:
                     print(f"Warning: Failed to load data for {subdir}: {e}")
+                    raise e
                     continue
         
         elif (run_path / "log.json").exists():
@@ -614,6 +615,7 @@ def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
                 
             except Exception as e:
                 print(f"Warning: Failed to load data for {run_path}: {e}")
+                raise e
                 continue
         
         else:
@@ -700,6 +702,7 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
                     })
                 except Exception as e:
                     print(f"Warning: Failed to load run {subdir}: {e}")
+                    raise e
                     continue
             
             # Group runs by non-optimized parameters
@@ -753,6 +756,7 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
                 
             except Exception as e:
                 print(f"Warning: Failed to load data for {run_path}: {e}")
+                raise e
                 continue
         
         else:

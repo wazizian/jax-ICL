@@ -81,10 +81,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
     # Helper function to create plots for a specific baseline
     def create_icl_plots_for_baseline(baseline_type: str, baseline_suffix: str):
         # Create output directories for ICL plots
-        if output_dir is None:
-            base_output_dir = Path("outputs") / run_id
-        else:
-            base_output_dir = output_dir
+        base_output_dir = output_dir / run_id
             
         icl_mse_dir = base_output_dir / f"icl_plots_mse_{baseline_suffix}"
         icl_rel_err_dir = base_output_dir / f"icl_plots_rel_err_{baseline_suffix}"
@@ -126,7 +123,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                     if (f" | {baseline_type}" in metric_name
                         and "(RelErr)" not in metric_name
                         and "Std" not in metric_name
-                        and values and step_idx < len(values)):
+                        and values is not None and step_idx < len(values)):
 
                         # optional skips that used to rely on the combined label
                         if "(True)" in metric_name or "Test tasks" in task_name:
@@ -158,8 +155,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 std_by_pos = std_by_pos[burn_in:]
                             # avoid shape mismatches
                             if len(std_by_pos) == len(mse_by_position):
-                                lower = np.exp(np.log(np.array(mse_by_position)) - np.log(std_by_pos))
-                                upper = np.exp(np.log(np.array(mse_by_position)) + np.log(std_by_pos))
+                                lower = mse_by_position - std_by_pos
+                                upper = mse_by_position + std_by_pos
                                 ax.fill_between(positions, lower, upper, color=color, alpha=0.2)
 
             ax.set_xlabel("Context Length", fontsize=FONT_SIZE)

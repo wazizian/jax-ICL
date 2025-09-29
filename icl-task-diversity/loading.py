@@ -16,7 +16,6 @@ import jax.numpy as jnp
 # Global configuration for parallel processing
 MAX_NUM_CPUS = min(8, multiprocessing.cpu_count())
 
-
 def get_most_recent_run() -> str:
     """Find the most recent run ID in the outputs directory."""
     outputs_dir = Path("outputs")
@@ -281,7 +280,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 if (log_key in eval_data and 
                                     metric_key in eval_data[log_key] and 
                                     file_index < len(eval_data[log_key][metric_key])):
-                                    eval_data[log_key][metric_key][file_index] = jnp.array(tensor_data.numpy())
+                                    eval_data[log_key][metric_key][file_index] = jnp.array(tensor_data)
                     
                     load_time = time.time() - load_start
                     print(f"Parallel loading completed in {load_time:.2f}s using {num_workers} workers")
@@ -307,7 +306,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 if (log_key in eval_data and 
                                     metric_key in eval_data[log_key] and 
                                     i < len(eval_data[log_key][metric_key])):
-                                    eval_data[log_key][metric_key][i] = jnp.array(tensor_data.numpy())
+                                    eval_data[log_key][metric_key][i] = jnp.array(tensor_data)
                                     
                     except Exception as e:
                         print(f"Warning: Could not load safetensor file {safetensor_file}: {e}")
@@ -319,8 +318,9 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                     log[log_key] = {}
                 for metric_key, values in metrics.items():
                     # Filter out None values (files that failed to load)
-                    filtered_values = [v for v in values if v is not None]
-                    if filtered_values:
+                    # filtered_values = [v for v in values if v is not None]
+                    filtered_values = jnp.stack([v for v in values if v is not None], axis=0)
+                    if filtered_values is not None and len(filtered_values) > 0:
                         log[log_key][metric_key] = filtered_values
                     
             # Load baseline comparisons if available
@@ -343,7 +343,8 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 log[log_key] = {}
                             
                             # Duplicate baseline data across all evaluation steps
-                            duplicated_data = [jnp.array(tensor_data.numpy())] * num_eval_steps
+                            duplicated_data = [jnp.array(tensor_data)] * num_eval_steps
+                            duplicated_data = jnp.stack(duplicated_data, axis=0)
                             log[log_key][metric_key] = duplicated_data
                             
                     print(f"Successfully integrated baseline comparisons")
