@@ -5,10 +5,11 @@ Task shift analysis functionality.
 import json
 from pathlib import Path
 import matplotlib.pyplot as plt
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 import jax
 from jax import jit
+import equinox as eqx
 from functools import partial
 import yaml
 from scipy.optimize import curve_fit
@@ -50,15 +51,12 @@ def normalize_error_values(values):
     Returns:
         List of scalars (averaged over samples if needed)
     """
-    if not values:
-        return values
-
-    if not isinstance(values, np.ndarray):
+    if not isinstance(values,jnp.ndarray):
         # Convert to numpy array for easier handling
-        values = np.array(values)
+        values =jnp.array(values)
     if values.ndim == 2:
         # New format: average over batch dimension for each position
-        return np.mean(values, axis=0)
+        return jnp.mean(values, axis=0)
     elif values.ndim == 1:
         return values
     else:
@@ -108,101 +106,94 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
     Returns:
         float: The minimal mean MSE AUC value, or float('inf') if computation fails
     """
-    try:
-        # Reuse the existing logic from extract_min_mse_params_for_baseline
-        eval_steps = log.get("eval/step", [])
-        if not eval_steps:
-            return float('inf')
-        
-        # Extract evaluation metrics for all steps
-        eval_metrics = {}
-        for key, value in log.items():
-            if key.startswith("eval/") and key != "eval/step":
-                task_name = key.split("/")[1]
-                if task_name not in eval_metrics:
-                    eval_metrics[task_name] = {}
-                for metric_name, metric_values in value.items():
-                    eval_metrics[task_name][metric_name] = metric_values
-        
-        # Find tasks that match our criteria and baseline
-        task_data = {}
-        for task_name, metrics in eval_metrics.items():
-            if task_name == "Test tasks" or task_name.startswith("Fixed task"):
-                selected_metric = None
-                for metric_name, values in metrics.items():
-                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
-                        selected_metric = (metric_name, values)
-                        break
-                
-                if selected_metric:
-                    metric_name, values = selected_metric
-                    shift_distance = extract_task_shift_distance(task_name)
-                    task_data[task_name] = (shift_distance, values)
-        
-        if not task_data:
-            return float('inf')
-        
-        # Sort tasks by shift distance for consistent ordering
-        sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
-        task_names = [task_name for task_name, _ in sorted_tasks]
-        shift_distances = jnp.array([shift_dist for _, (shift_dist, _) in sorted_tasks])
-        
-        # Collect MSE data for all steps and tasks
-        num_steps = len(eval_steps)
-        num_tasks = len(sorted_tasks)
-        
-        all_min_mse = np.zeros((num_steps, num_tasks))
-        all_mean_mse = np.zeros((num_steps, num_tasks))
-        all_end_mse = np.zeros((num_steps, num_tasks))
+    # Reuse the existing logic from extract_min_mse_params_for_baseline
+    eval_steps = log.get("eval/step", [])
+    
+    # Extract evaluation metrics for all steps
+    eval_metrics = {}
+    for key, value in log.items():
+        if key.startswith("eval/") and key != "eval/step":
+            task_name = key.split("/")[1]
+            if task_name not in eval_metrics:
+                eval_metrics[task_name] = {}
+            for metric_name, metric_values in value.items():
+                eval_metrics[task_name][metric_name] = metric_values
+    
+    # Find tasks that match our criteria and baseline
+    task_data = {}
+    for task_name, metrics in eval_metrics.items():
+        if task_name == "Test tasks" or task_name.startswith("Fixed task"):
+            selected_metric = None
+            for metric_name, values in metrics.items():
+                if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and values:
+                    selected_metric = (metric_name, values)
+                    break
+            
+            if selected_metric:
+                metric_name, values = selected_metric
+                shift_distance = extract_task_shift_distance(task_name)
+                task_data[task_name] = (shift_distance, values)
+    
+    if not task_data:
+        return float('inf')
+    
+    # Sort tasks by shift distance for consistent ordering
+    sorted_tasks = sorted(task_data.items(), key=lambda x: x[1][0])
+    task_names = [task_name for task_name, _ in sorted_tasks]
+    shift_distances = jnp.array([shift_dist for _, (shift_dist, _) in sorted_tasks])
+    
+    # Collect MSE data for all steps and tasks
+    num_steps = len(eval_steps)
+    num_tasks = len(sorted_tasks)
+    
+    all_min_mse =np.zeros((num_steps, num_tasks))
+    all_mean_mse =np.zeros((num_steps, num_tasks))
+    all_end_mse =np.zeros((num_steps, num_tasks))
 
 
-        for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
-            assert num_steps == len(values), "Mismatch in number of evaluation steps"
-            for step_idx in range(num_steps):
-                if step_idx < len(values):
-                    mse_values = normalize_error_values(values[step_idx])
-                    if mse_values is not None and len(mse_values) > 0:
-                        mse_jax = jnp.array(mse_values)
-                        min_mse, mean_mse, end_mse = compute_min_mean_end_mse_over_context(mse_jax)
-                        all_min_mse[step_idx, task_idx] = float(min_mse)
-                        all_mean_mse[step_idx, task_idx] = float(mean_mse)
-                        all_end_mse[step_idx, task_idx] = float(end_mse)
-                    else:
-                        all_min_mse[step_idx, task_idx] = float('inf')
-                        all_mean_mse[step_idx, task_idx] = float('inf')
-                        all_end_mse[step_idx, task_idx] = float('inf')
+    for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
+        assert num_steps == len(values), "Mismatch in number of evaluation steps"
+        for step_idx in range(num_steps):
+            if step_idx < len(values):
+                mse_values = normalize_error_values(values[step_idx])
+                if mse_values is not None and len(mse_values) > 0:
+                    mse_jax = jnp.array(mse_values)
+                    min_mse, mean_mse, end_mse = compute_min_mean_end_mse_over_context(mse_jax)
+                    all_min_mse[step_idx, task_idx] = float(min_mse)
+                    all_mean_mse[step_idx, task_idx] = float(mean_mse)
+                    all_end_mse[step_idx, task_idx] = float(end_mse)
                 else:
                     all_min_mse[step_idx, task_idx] = float('inf')
                     all_mean_mse[step_idx, task_idx] = float('inf')
                     all_end_mse[step_idx, task_idx] = float('inf')
-        
-        # Convert to JAX arrays for optimized computation
-        all_min_mse_jax = jnp.array(all_min_mse)
-        all_mean_mse_jax = jnp.array(all_mean_mse)
-        all_end_mse_jax = jnp.array(all_end_mse)
-        
-        # Find best step and return the minimal mean AUC
-        def compute_step_auc(step_idx):
-            mean_log_mse = jnp.log(all_mean_mse_jax[step_idx])
-            return compute_auc_trapz(shift_distances, mean_log_mse)
-        
-        step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
-        best_step, min_auc = jnp.argmin(step_aucs), float(jnp.min(step_aucs))
+            else:
+                all_min_mse[step_idx, task_idx] = float('inf')
+                all_mean_mse[step_idx, task_idx] = float('inf')
+                all_end_mse[step_idx, task_idx] = float('inf')
+    
+    # Convert to JAX arrays for optimized computation
+    all_min_mse_jax = jnp.array(all_min_mse)
+    all_mean_mse_jax = jnp.array(all_mean_mse)
+    all_end_mse_jax = jnp.array(all_end_mse)
+    
+    # Find best step and return the minimal mean AUC
+    def compute_step_auc(step_idx):
+        mean_log_mse = jnp.log(all_mean_mse_jax[step_idx])
+        return compute_auc_trapz(shift_distances, mean_log_mse)
+    
+    step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
+    best_step, min_auc = jnp.argmin(step_aucs), float(jnp.min(step_aucs))
 
-        # Build new log by removing everything except the best step
-        new_log = {"eval/step": [eval_steps[int(best_step)]]}
-        for task_name in task_names:
-            new_log[f"eval/{task_name}"] = {}
-            for metric_name, values in eval_metrics[task_name].items():
-                    new_log[f"eval/{task_name}"][metric_name] = [values[int(best_step)]]
-        print("Eval steps:", new_log["eval/step"])
+    # Build new log by removing everything except the best step
+    new_log = {"eval/step": [eval_steps[int(best_step)]]}
+    for task_name in task_names:
+        new_log[f"eval/{task_name}"] = {}
+        for metric_name, values in eval_metrics[task_name].items():
+                new_log[f"eval/{task_name}"][metric_name] = [values[int(best_step)]]
+    print("Eval steps:", new_log["eval/step"])
 
-        
-        return new_log, min_auc
-        
-    except Exception as e:
-        return float('inf')
-
+    
+    return new_log, min_auc
 
 def extract_power_law_params(log: dict) -> dict:
     """Extract power law parameters (alpha, C) for all tasks from log data.
@@ -249,21 +240,21 @@ def extract_power_law_params(log: dict) -> dict:
             if mse_values is None or len(mse_values) < 3:
                 continue
                 
-            k = np.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
+            k =jnp.arange(len(mse_values))  # Context lengths: 0, 1, 2, ...
             
             try:
                 # Fit the power law curve
                 initial_guess = [0., 1.0, mse_values[0]]
                 
                 popt, pcov = curve_fit(icl_power_law, k, mse_values, p0=initial_guess, 
-                                     bounds=([0, 0, 0], [np.inf, np.inf, np.inf]), maxfev=5000)
+                                     bounds=([0, 0, 0], [jnp.inf,jnp.inf,jnp.inf]), maxfev=5000)
                 
                 D_fit, alpha_fit, C_fit = popt
                 
                 # Compute R-squared
                 y_pred = icl_power_law(k, D_fit, alpha_fit, C_fit)
-                ss_res = np.sum((mse_values - y_pred) ** 2)
-                ss_tot = np.sum((mse_values - np.mean(mse_values)) ** 2)
+                ss_res =jnp.sum((mse_values - y_pred) ** 2)
+                ss_tot =jnp.sum((mse_values -jnp.mean(mse_values)) ** 2)
                 r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
                 
                 results[task_name] = (alpha_fit, C_fit, r_squared)
@@ -375,40 +366,39 @@ def average_over_seed(run_groups: dict) -> list:
     import jax
     import pathlib
 
+    @eqx.filter_jit
     def gmean(a, axis=None):
-        a = np.array(a)
-        log_a = np.log(a)
-        return np.exp(np.mean(log_a, axis=axis))
-
+        a =jnp.array(a)
+        log_a =jnp.log(a)
+        return jnp.exp(jnp.mean(log_a, axis=axis))
     def avg_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
             return args[0]
         elif isinstance(args[0], (int, float)):
-            return gmean(np.array(args))
+            return gmean(jnp.array(args))
         elif isinstance(args[0], list):
-            new_args = np.stack([np.array(a) for a in args], axis=0)
+            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
             return gmean(new_args, axis=0).tolist()
-        elif isinstance(args[0], np.ndarray):
-            new_args = np.stack([np.array(a) for a in args], axis=0)
+        elif isinstance(args[0],jnp.ndarray):
+            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
             return gmean(new_args, axis=0)
         else:
             raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
-
+    @eqx.filter_jit
     def gstd(a, axis=None):
-        a = np.array(a)
-        log_a = np.log(a)
-        return np.exp(np.std(log_a, axis=axis))
-
+        a =jnp.array(a)
+        log_a =jnp.log(a)
+        return jnp.exp(jnp.std(log_a, axis=axis))
     def std_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
             return args[0]
         elif isinstance(args[0], (int, float)):
-            return gstd(np.array(args))
+            return gstd(jnp.array(args))
         elif isinstance(args[0], list):
-            new_args = np.stack([np.array(a) for a in args], axis=0)
+            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
             return gstd(new_args, axis=0).tolist()
-        elif isinstance(args[0], np.ndarray):
-            new_args = np.stack([np.array(a) for a in args], axis=0)
+        elif isinstance(args[0],jax.Array):
+            new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
             return gstd(new_args, axis=0)
         else:
             raise ValueError(f"Unsupported type for std computation: {type(args[0])}")
@@ -448,41 +438,33 @@ def find_best_param_combination_by_auc(run_group: list, optimize_params: list, b
     best_param_values = {}
     
     for run in run_group:
-        try:
-            # Extract parameter values for this run
-            param_values = {}
-            for param in optimize_params:
-                param_values[param] = get_param_value_from_config(run['config'], param)
+        # Extract parameter values for this run
+        param_values = {}
+        for param in optimize_params:
+            param_values[param] = get_param_value_from_config(run['config'], param)
+        
+        # Get AUC from cache or compute it
+        if cached_aucs and run['name'] in cached_aucs:
+            min_auc = cached_aucs[run['name']]
+        else:
+            # Compute the minimal AUC for this run using the helper function
+            log = run['log']
+            updated_log, min_auc = compute_best_auc_for_baseline(log, baseline_type)
+            run['log'] = updated_log  # Update log to only contain best step
             
-            # Get AUC from cache or compute it
-            if cached_aucs and run['name'] in cached_aucs:
-                min_auc = cached_aucs[run['name']]
-            else:
-                # Compute the minimal AUC for this run using the helper function
-                log = run['log']
-                updated_log, min_auc = compute_best_auc_for_baseline(log, baseline_type)
-                run['log'] = updated_log  # Update log to only contain best step
-                
-                # Cache the result for future use
-                if cached_aucs is not None:
-                    cached_aucs[run['name']] = min_auc
-            
-            if min_auc == float('inf'):  # No valid data
-                continue
-            
-            # Update best if this is better
-            if min_auc < best_auc:
-                best_auc = min_auc
-                best_run = run
-                best_param_values = param_values
-                
-        except (KeyError, ValueError, TypeError) as e:
-            print(f"Warning: Failed to process run {run.get('name', 'unknown')}: {e}")
+            # Cache the result for future use
+            if cached_aucs is not None:
+                cached_aucs[run['name']] = min_auc
+        
+        if min_auc == float('inf'):  # No valid data
             continue
-        except Exception as e:
-            print(f"Warning: Unexpected error processing run {run.get('name', 'unknown')}: {e}")
-            continue
-    
+        
+        # Update best if this is better
+        if min_auc < best_auc:
+            best_auc = min_auc
+            best_run = run
+            best_param_values = param_values
+                
     return best_run, best_auc, best_param_values
 
 

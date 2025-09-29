@@ -10,6 +10,8 @@ import concurrent.futures
 import multiprocessing
 from safetensors.numpy import load_file
 from typing import Optional, Tuple
+import jax
+import jax.numpy as jnp
 
 # Global configuration for parallel processing
 MAX_NUM_CPUS = min(8, multiprocessing.cpu_count())
@@ -279,7 +281,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 if (log_key in eval_data and 
                                     metric_key in eval_data[log_key] and 
                                     file_index < len(eval_data[log_key][metric_key])):
-                                    eval_data[log_key][metric_key][file_index] = tensor_data.tolist()
+                                    eval_data[log_key][metric_key][file_index] = jnp.array(tensor_data.tolist())
                     
                     load_time = time.time() - load_start
                     print(f"Parallel loading completed in {load_time:.2f}s using {num_workers} workers")
