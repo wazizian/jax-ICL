@@ -376,13 +376,17 @@ def average_over_seed(run_groups: dict) -> list:
         return jnp.exp(jnp.mean(log_a, axis=axis))
     def avg_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
+            print(f"Got string/path with {len(args)} args")
             return args[0]
         elif isinstance(args[0], (int, float)):
+            print(f"Got scalar with {len(args)} args")
             return gmean(jnp.array(args))
         elif isinstance(args[0], list):
+            print(f"Got lists with {len(args[0])} elements and {len(args)} args")
             new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
             return gmean(new_args, axis=0).tolist()
         elif isinstance(args[0],jnp.ndarray):
+            print(f"Got jax arrays with shape {args[0].shape} and {len(args)} args")
             new_args =jnp.stack([jnp.array(a) for a in args], axis=0)
             return gmean(new_args, axis=0)
         else:
