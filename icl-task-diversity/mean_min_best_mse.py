@@ -530,14 +530,10 @@ def load_all_logs(run_paths: list, run_labels: list = None) -> dict:
     
     actual_run_labels = []
 
-    FAST = True
     
     for i, run_path in enumerate(run_paths):
         run_path = Path(run_path)
 
-        if FAST and i > 3:
-            print("Fast mode: only loading first 4 runs")
-            break
         
         # Determine run label
         if run_labels and i < len(run_labels):
@@ -648,7 +644,7 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
         'run_labels': []
     }
 
-    FAST = True
+    FAST = False
     
     actual_run_labels = []
 

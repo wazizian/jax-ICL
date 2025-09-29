@@ -380,17 +380,17 @@ def average_over_seed(run_groups: dict) -> list:
 
     def avg_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
-            print(f"Got string/path with {len(args)} args")
+            #print(f"Got string/path with {len(args)} args")
             return args[0]
         elif isinstance(args[0], (int, float)):
             #print(f"Got scalar with {len(args)} args")
             return mean(jnp.array(args))
         elif isinstance(args[0], list):
-            print(f"Got lists with {len(args[0])} elements and {len(args)} args")
+            #print(f"Got lists with {len(args[0])} elements and {len(args)} args")
             new_args = [jnp.array(a) for a in args]
             return mean_stack(new_args)
         elif isinstance(args[0],jnp.ndarray):
-            print(f"Got jax arrays with shape {args[0].shape} and {len(args)} args")
+            #print(f"Got jax arrays with shape {args[0].shape} and {len(args)} args")
             return mean_stack(args)
         else:
             raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
@@ -418,7 +418,7 @@ def average_over_seed(run_groups: dict) -> list:
         return ret
 
     new_runs = []
-    FAST=False
+    FAST=True
     for optimize_key, runs in run_groups.items():
         if not FAST:
             res = jax.tree.map(avg_func, *[run for run in runs])

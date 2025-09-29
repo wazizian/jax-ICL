@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
 import numpy as np
 
@@ -92,8 +93,16 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
         n_curves = len(eval_metrics)
 
         task_names = [t for t in list(eval_metrics.keys()) if "Test tasks" not in t]
-        colors_cmap = cm.get_cmap('viridis', len(task_names))
-        task_to_color = {t: colors_cmap(i) for i, t in enumerate(task_names)}
+        shifts = [float(t.split(" ")[-1]) for t in task_names]
+        max_shift = max(abs(s) for s in shifts)
+        n_tasks = len(task_names)
+        if len(task_names) >= 5:
+            norm = mcolors.Normalize(vmin=0, vmax=max_shift)
+            cmap = cm.get_cmap("viridis")
+            task_to_color = {t: cmap(norm(s)) for t, s in zip(task_names, shifts)} 
+        else:
+            colors_cmap = cm.get_cmap('viridis', len(task_names))
+            task_to_color = {t: colors_cmap(i) for i, t in enumerate(task_names)}
 
         # gather all methods that match this baseline (exclude RelErr and Std)
         all_methods = sorted({
@@ -169,25 +178,37 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
             ax.minorticks_off()
 
             # ---- two separate legends: colors (tasks) and linestyles (methods) ----
-            color_handles = [Line2D([0], [0], color=task_to_color[t], lw=3) for t in task_names]
-            color_labels  = [pretty_task_label(t) for t in task_names] 
             style_handles = [Line2D([0], [0], color='black', lw=1, linestyle=method_to_style[m]) for m in all_methods]
             style_labels  = list(all_methods)
 
+            if len(task_names) < 5:
+                color_handles = [Line2D([0], [0], color=task_to_color[t], lw=3) for t in task_names]
+                color_labels  = [pretty_task_label(t) for t in task_names] 
 
-            # side-by-side, overlaid, n
-            leg_tasks = ax.legend(
-                color_handles, color_labels,
-                # title="Tasks",
-                loc="upper left",
-                bbox_to_anchor=(0.02, 0.98),    # left legend (x,y) in axes coords
-                bbox_transform=ax.transAxes,
-                frameon=False,
-                fontsize=16,
-                handlelength=1.5,
-                labelspacing=0.3,
-                borderaxespad=0.0,
-            )
+
+                # side-by-side, overlaid, n
+                leg_tasks = ax.legend(
+                    color_handles, color_labels,
+                    # title="Tasks",
+                    loc="upper left",
+                    bbox_to_anchor=(0.02, 0.98),    # left legend (x,y) in axes coords
+                    bbox_transform=ax.transAxes,
+                    frameon=False,
+                    fontsize=16,
+                    handlelength=1.5,
+                    labelspacing=0.3,
+                    borderaxespad=0.0,
+                )
+                ax.add_artist(leg_tasks)
+                leg_tasks.set_zorder(10)
+            else:
+                sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([])
+
+                cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+                cbar.set_label("Shift", fontsize=FONT_SIZE)
+                cbar.ax.tick_params(labelsize=16)
+
             leg_methods = ax.legend(
                 style_handles, style_labels,
                 # title="Methods",
@@ -200,8 +221,6 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                 labelspacing=0.3,
                 borderaxespad=0.0,
             )
-            ax.add_artist(leg_tasks)
-            leg_tasks.set_zorder(10)
             leg_methods.set_zorder(10)
 
                      # ----------------------------------------------------------------------
