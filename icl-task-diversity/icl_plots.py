@@ -6,7 +6,7 @@ import numpy as np
 
 from loading import load_log_with_safetensors
 from task_shift import normalize_error_values, find_valid_multirun_subdirs
-from mean_min_best_mse import load_all_logs
+from mean_min_best_mse import load_all_logs, load_all_logs_with_param_optimization
 
 def format_task_name_for_display(task_name, metric_name):
     """Format task name for display in legends, replacing 'Fixed task' with 'Shifted task'."""

@@ -17,6 +17,7 @@ from weight_analysis import plot_weights_analysis, plot_weights_analysis_multiru
 from icl_plots import plot_icl_for_all_steps
 from training_analysis import plot_training_loss, fit_mse_curves_and_compute_metrics, print_summary
 from hyperparam_analysis import hyperparam_analysis
+from opt_icl_plots import plot_opt_icl_plots
 
 
 def analyze_multirun(multirun_id: str, custom_names: list = None):
@@ -149,6 +150,12 @@ Examples:
         help='Perform minimum MSE analysis across multiple runs. Optionally specify comma-separated parameters to optimize (e.g., "task.n_tasks,train.clip_max_norm")'
     )
     parser.add_argument(
+        '--opt-icl-plots',
+        nargs='?',
+        const=True,
+        help='Perform ICL plots analysis with parameter optimization. Optionally specify comma-separated parameters to optimize (e.g., "task.n_tasks,train.clip_max_norm")'
+    )
+    parser.add_argument(
         '--icl-plots',
         action='store_true',
         help='Generate ICL plots for all evaluation steps (MSE and RelErr vs context length)'
@@ -225,6 +232,36 @@ Examples:
                 plot_min_mse_analysis(run_paths, optimize_params=optimize_params)
         else:
             print("Min MSE analysis requires --multirun option")
+        return
+
+    if args.opt_icl_plots is not None:
+        if args.opt_icl_plots is True:
+            optimize_params = None  # No parameter optimization
+        else:
+            optimize_params = [param.strip() for param in args.opt_icl_plots.split(',')]
+        
+        if args.multirun is not None:
+            multirun_id, custom_names = parse_multirun_args(args.multirun, args.run_id)
+            if not multirun_id:
+                try:
+                    run_ids = [get_most_recent_run()]
+                    print(f"Using most recent run: {run_ids[0]}")
+                except FileNotFoundError as e:
+                    print(f"Error: {e}")
+                    return
+            
+            # Prepare run paths for min MSE analysis
+            if multirun_id:
+                multirun_path = Path("outputs/multirun") / multirun_id
+                if multirun_path.exists():
+                    plot_opt_icl_plots([multirun_path], run_labels=custom_names, optimize_params=optimize_params)
+                else:
+                    print(f"Multirun directory not found: {multirun_path}")
+            else:
+                run_paths = [Path("outputs") / rid for rid in run_ids]
+                plot_opt_icl_plots(run_paths, optimize_params=optimize_params)
+        else:
+            print("Opt ICL analysis requires --multirun option")
         return
 
     # Handle weights analysis mode

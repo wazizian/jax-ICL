@@ -630,6 +630,7 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
     Returns:
         dict: Same format as load_all_logs but with optimized parameter combinations
     """
+    print(f"Performing parameter optimization over: {optimize_params} using baseline: {baseline_type}")
     if not optimize_params:
         return load_all_logs(run_paths, run_labels)
     
@@ -640,6 +641,7 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
     }
     
     actual_run_labels = []
+
     
     for i, run_path in enumerate(run_paths):
         run_path = Path(run_path)
@@ -711,6 +713,8 @@ def load_all_logs_with_param_optimization(run_paths: list, run_labels: list = No
                 config = best_run['config']
                 log = best_run['log']
                 task_centers = config.get('eval', {}).get('task_centers', [])
+
+                print(f"Eval steps:", log.get("eval/step", []))
                 
                 loaded_data['logs'][group_label] = log
                 loaded_data['metadata'][group_label] = (config, task_centers)

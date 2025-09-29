@@ -154,8 +154,10 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
         all_min_mse = np.zeros((num_steps, num_tasks))
         all_mean_mse = np.zeros((num_steps, num_tasks))
         all_end_mse = np.zeros((num_steps, num_tasks))
-        
+
+
         for task_idx, (task_name, (shift_dist, values)) in enumerate(sorted_tasks):
+            assert num_steps == len(values), "Mismatch in number of evaluation steps"
             for step_idx in range(num_steps):
                 if step_idx < len(values):
                     mse_values = normalize_error_values(values[step_idx])
@@ -185,9 +187,18 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
             return compute_auc_trapz(shift_distances, mean_log_mse)
         
         step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
-        min_auc = float(jnp.min(step_aucs))
+        best_step, min_auc = jnp.argmin(step_aucs), float(jnp.min(step_aucs))
+
+        # Build new log by removing everything except the best step
+        new_log = {"eval/step": [eval_steps[int(best_step)]]}
+        for task_name in task_names:
+            new_log[f"eval/{task_name}"] = {}
+            for metric_name, values in eval_metrics[task_name].items():
+                    new_log[f"eval/{task_name}"][metric_name] = [values[int(best_step)]]
+        print("Eval steps:", new_log["eval/step"])
+
         
-        return min_auc
+        return new_log, min_auc
         
     except Exception as e:
         return float('inf')
@@ -326,9 +337,10 @@ def group_runs_by_other_params(run_data: list, optimize_params: list, all_swept_
         all_swept_params: List of all swept parameters from multirun.yaml
         
     Returns:
-        dict: {other_params_tuple: [list of runs with those other params]}
+        dict: {other_params_tuple: [runs] averaged over add_seed}
     """
-    other_params = [p for p in all_swept_params if p not in optimize_params]
+    other_params = [p for p in all_swept_params if p not in optimize_params and p != 'add_seed']
+
     
     groups = {}
     for run in run_data:
@@ -342,9 +354,82 @@ def group_runs_by_other_params(run_data: list, optimize_params: list, all_swept_
         if other_key not in groups:
             groups[other_key] = []
         groups[other_key].append(run)
-    
+
+    for other_key, runs in groups.items():
+        new_group = {}
+        for run in runs:
+            # create tuple of "optimize" parameter values for grouping
+            optimize_values = []
+            for param in optimize_params:
+                value = get_param_value_from_config(run['config'], param)
+                optimize_values.append((param, value))
+            optimize_key = tuple(optimize_values)
+            if optimize_key not in new_group:
+                new_group[optimize_key] = []
+            new_group[optimize_key].append(run)
+        groups[other_key] = average_over_seed(new_group)
+
     return groups
 
+def average_over_seed(run_groups: dict) -> list:
+    import jax
+    import pathlib
+
+    def gmean(a, axis=None):
+        a = np.array(a)
+        log_a = np.log(a)
+        return np.exp(np.mean(log_a, axis=axis))
+
+    def avg_func(*args):
+        if isinstance(args[0], (str, pathlib.Path)):
+            return args[0]
+        elif isinstance(args[0], (int, float)):
+            return gmean(np.array(args))
+        elif isinstance(args[0], list):
+            new_args = np.stack([np.array(a) for a in args], axis=0)
+            return gmean(new_args, axis=0).tolist()
+        elif isinstance(args[0], np.ndarray):
+            new_args = np.stack([np.array(a) for a in args], axis=0)
+            return gmean(new_args, axis=0)
+        else:
+            raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
+
+    def gstd(a, axis=None):
+        a = np.array(a)
+        log_a = np.log(a)
+        return np.exp(np.std(log_a, axis=axis))
+
+    def std_func(*args):
+        if isinstance(args[0], (str, pathlib.Path)):
+            return args[0]
+        elif isinstance(args[0], (int, float)):
+            return gstd(np.array(args))
+        elif isinstance(args[0], list):
+            new_args = np.stack([np.array(a) for a in args], axis=0)
+            return gstd(new_args, axis=0).tolist()
+        elif isinstance(args[0], np.ndarray):
+            new_args = np.stack([np.array(a) for a in args], axis=0)
+            return gstd(new_args, axis=0)
+        else:
+            raise ValueError(f"Unsupported type for std computation: {type(args[0])}")
+
+    new_runs = []
+    for optimize_key, runs in run_groups.items():
+        res = jax.tree.map(avg_func, *[run for run in runs])
+        std_res = jax.tree.map(std_func, *[run for run in runs])
+        log = res['log']
+        for key in log.keys():
+            if isinstance(log[key], dict):
+                new_dict = {}
+                for metric_name in log[key].keys():
+                    if "Std" not in metric_name and f"{metric_name}_Std" not in log[key]:
+                        print(f"Updating metric {key}/{metric_name} with std at {key}/{metric_name}_Std")
+                        std_values = std_res['log'][key][metric_name]
+                        new_dict[f"{metric_name}_Std"] = std_values
+                log[key].update(new_dict)
+        new_runs.append(res)
+
+    return new_runs
 
 def find_best_param_combination_by_auc(run_group: list, optimize_params: list, baseline_type: str, cached_aucs: dict = None) -> tuple:
     """Find the best parameter combination within a group of runs based on AUC.
@@ -375,7 +460,8 @@ def find_best_param_combination_by_auc(run_group: list, optimize_params: list, b
             else:
                 # Compute the minimal AUC for this run using the helper function
                 log = run['log']
-                min_auc = compute_best_auc_for_baseline(log, baseline_type)
+                updated_log, min_auc = compute_best_auc_for_baseline(log, baseline_type)
+                run['log'] = updated_log  # Update log to only contain best step
                 
                 # Cache the result for future use
                 if cached_aucs is not None:
