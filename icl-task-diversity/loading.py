@@ -281,7 +281,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 if (log_key in eval_data and 
                                     metric_key in eval_data[log_key] and 
                                     file_index < len(eval_data[log_key][metric_key])):
-                                    eval_data[log_key][metric_key][file_index] = jnp.array(tensor_data.tolist())
+                                    eval_data[log_key][metric_key][file_index] = jnp.array(tensor_data.numpy())
                     
                     load_time = time.time() - load_start
                     print(f"Parallel loading completed in {load_time:.2f}s using {num_workers} workers")
@@ -307,7 +307,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 if (log_key in eval_data and 
                                     metric_key in eval_data[log_key] and 
                                     i < len(eval_data[log_key][metric_key])):
-                                    eval_data[log_key][metric_key][i] = tensor_data.tolist()
+                                    eval_data[log_key][metric_key][i] = jnp.array(tensor_data.numpy())
                                     
                     except Exception as e:
                         print(f"Warning: Could not load safetensor file {safetensor_file}: {e}")
@@ -343,7 +343,7 @@ def load_log_with_safetensors(run_path: Path) -> dict:
                                 log[log_key] = {}
                             
                             # Duplicate baseline data across all evaluation steps
-                            duplicated_data = [tensor_data.tolist()] * num_eval_steps
+                            duplicated_data = [jnp.array(tensor_data.numpy())] * num_eval_steps
                             log[log_key][metric_key] = duplicated_data
                             
                     print(f"Successfully integrated baseline comparisons")

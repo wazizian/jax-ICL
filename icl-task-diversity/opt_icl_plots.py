@@ -118,7 +118,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
         
         # Generate plots for each evaluation step
         for step_idx, eval_step in enumerate(eval_steps):
-            fig, ax = plt.subplots(figsize=(10, 8))
+            fig, ax = plt.subplots(figsize=(14, 8))
 
             for task_name, metrics in eval_metrics.items():
                 for metric_name, values in metrics.items():
@@ -186,6 +186,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                 bbox_to_anchor=(0.02, 0.98),    # left legend (x,y) in axes coords
                 bbox_transform=ax.transAxes,
                 frameon=False,
+                fontsize=16,
                 handlelength=1.5,
                 labelspacing=0.3,
                 borderaxespad=0.0,
@@ -196,6 +197,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                 loc="upper left",
                 bbox_to_anchor=(0.25, 0.98),    # right legend (adjust x to taste)
                 bbox_transform=ax.transAxes,
+                fontsize=16,
                 frameon=False,
                 handlelength=1.5,
                 labelspacing=0.3,
