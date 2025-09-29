@@ -99,9 +99,11 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
         if len(task_names) >= 5:
             norm = mcolors.Normalize(vmin=0, vmax=max_shift)
             cmap = cm.get_cmap("viridis")
+            cmap = cm.get_cmap("cividis")
             task_to_color = {t: cmap(norm(s)) for t, s in zip(task_names, shifts)} 
         else:
             colors_cmap = cm.get_cmap('viridis', len(task_names))
+            colors_cmap = cm.get_cmap('cividis', len(task_names))
             task_to_color = {t: colors_cmap(i) for i, t in enumerate(task_names)}
 
         # gather all methods that match this baseline (exclude RelErr and Std)

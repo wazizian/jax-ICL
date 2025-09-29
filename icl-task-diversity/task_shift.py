@@ -374,9 +374,16 @@ def average_over_seed(run_groups: dict) -> list:
         return jnp.mean(a, axis=axis)
 
     @eqx.filter_jit
-    def mean_stack(args):
+    def old_mean_stack(args):
         new_args =jnp.stack([a for a in args], axis=0)
         return jnp.mean(new_args, axis=0)
+
+    @eqx.filter_jit
+    def mean_stack(args):
+        ret = jnp.zeros_like(args[0])
+        for a in args:
+            ret = ret + a
+        return ret / len(args)
 
     def avg_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
@@ -398,9 +405,17 @@ def average_over_seed(run_groups: dict) -> list:
     def std(a, axis=None):
         return jnp.std(a, axis=axis)
     @eqx.filter_jit
-    def std_stack(args):
+    def old_std_stack(args):
         new_args =jnp.stack([a for a in args], axis=0)
         return jnp.std(new_args, axis=0)
+
+    @eqx.filter_jit
+    def std_stack(args):
+        ret = jnp.zeros_like(args[0])
+        mean = mean_stack(args)
+        for a in args:
+            ret = ret + (a - mean) ** 2
+        return jnp.sqrt(ret / len(args))
 
     def std_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
