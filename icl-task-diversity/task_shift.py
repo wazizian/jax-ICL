@@ -410,17 +410,20 @@ def average_over_seed(run_groups: dict) -> list:
 
     new_runs = []
     for optimize_key, runs in run_groups.items():
-        res = jax.tree.map(avg_func, *[run for run in runs])
-        std_res = jax.tree.map(std_func, *[run for run in runs])
-        log = res['log']
-        for key in log.keys():
-            if isinstance(log[key], dict):
-                new_dict = {}
-                for metric_name in log[key].keys():
-                    if "Std" not in metric_name and f"{metric_name}_Std" not in log[key]:
-                        std_values = std_res['log'][key][metric_name]
-                        new_dict[f"{metric_name}_Std"] = std_values
-                log[key].update(new_dict)
+        if not FAST:
+            res = jax.tree.map(avg_func, *[run for run in runs])
+            std_res = jax.tree.map(std_func, *[run for run in runs])
+            log = res['log']
+            for key in log.keys():
+                if isinstance(log[key], dict):
+                    new_dict = {}
+                    for metric_name in log[key].keys():
+                        if "Std" not in metric_name and f"{metric_name}_Std" not in log[key]:
+                            std_values = std_res['log'][key][metric_name]
+                            new_dict[f"{metric_name}_Std"] = std_values
+                    log[key].update(new_dict)
+        else:
+            res = runs[0]
         new_runs.append(res)
 
     return new_runs
