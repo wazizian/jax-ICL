@@ -223,7 +223,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
                         style_handles, style_labels,
                         # title="Methods",
                         loc="upper right",
-                        bbox_to_anchor=(0.77, 98),    # right legend (adjust x to taste)
+                        bbox_to_anchor=(0.77, 0.98),    # right legend (adjust x to taste)
                         bbox_transform=ax.transAxes,
                         fontsize=22,
                         frameon=False,
