@@ -146,6 +146,13 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
 
                         # MSE by position (already normalized in your helper)
                         mse_by_position = normalize_error_values(values[step_idx])
+                        if mse_by_position.ndim == 0:
+                            print(f"Careful: metric {metric_name} for task {task_name} at step {eval_step} is a scalar, trying to recover...")
+                            new_metric_name = f"{baseline_type} | {method}"
+                            mse_by_position = normalize_error_values(metrics[new_metric_name][step_idx])
+                            if mse_by_position.ndim == 0:
+                                print(f"Warning: still a scalar, skipping this metric.")
+                                continue
                         positions = list(range(1, len(mse_by_position) + 1))
 
                         # ARMA burn-in handling (apply to both mean and std arrays)
@@ -207,7 +214,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                         style_handles, style_labels,
                         # title="Methods",
                         loc="upper right",
-                        bbox_to_anchor=(0.77, 0.98),    # right legend (adjust x to taste)
+                        bbox_to_anchor=(0.77, 1.0),    # right legend (adjust x to taste)
                         bbox_transform=ax.transAxes,
                         fontsize=22,
                         frameon=False,
@@ -227,7 +234,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                         style_handles, style_labels,
                         # title="Methods",
                         loc="upper right",
-                        bbox_to_anchor=(0.92, 0.98),    # right legend (adjust x to taste)
+                        bbox_to_anchor=(0.95, 0.98),    # right legend (adjust x to taste)
                         bbox_transform=ax.transAxes,
                         fontsize=22,
                         frameon=False,
