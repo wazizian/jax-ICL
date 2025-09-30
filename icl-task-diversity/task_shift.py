@@ -185,6 +185,9 @@ def compute_best_auc_for_baseline(log: dict, baseline_type: str) -> float:
     step_aucs = jax.vmap(compute_step_auc)(jnp.arange(num_steps))
     best_step, min_auc = jnp.argmin(step_aucs), float(jnp.min(step_aucs))
 
+    best_step = num_steps - 1
+    min_auc = float(step_aucs[best_step])
+
     # Build new log by removing everything except the best step
     new_log = {"eval/step": [eval_steps[int(best_step)]]}
     for task_name in task_names:
