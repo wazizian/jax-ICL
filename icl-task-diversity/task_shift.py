@@ -445,7 +445,7 @@ def average_over_seed(run_groups: dict) -> list:
                     continue
                 new_log[task_name] = {}
                 for metric_name, values in tqdm(metrics.items(), leave=False, desc=f"Processing {task_name}"):
-                    if "Std" in metric_name:
+                    if "Std" in metric_name or "RelErr" in metric_name:
                         continue
                     metric_values = []
                     for run in runs:

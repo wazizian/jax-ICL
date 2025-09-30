@@ -217,7 +217,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
                         style_handles, style_labels,
                         # title="Methods",
                         loc="upper right",
-                        bbox_to_anchor=(0.77, 1.0),    # right legend (adjust x to taste)
+                        bbox_to_anchor=(0.77, 98),    # right legend (adjust x to taste)
                         bbox_transform=ax.transAxes,
                         fontsize=22,
                         frameon=False,
@@ -262,7 +262,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
         print(f"ICL MSE plots ({baseline_type} baseline) for {len(eval_steps)} steps saved to: {icl_mse_dir}")
     
     # Create plots for available baselines
-    if ridge_available:
+    if ridge_available and False:
         create_icl_plots_for_baseline('Ridge', 'ridge')
     
     if true_available:
