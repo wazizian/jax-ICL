@@ -408,7 +408,7 @@ def average_over_seed(run_groups: dict) -> list:
             s = shapes[0]
             if not all([sh == s for sh in shapes]):
                 print(f"Warning: Inconsistent shapes for averaging: {shapes}, trying to recover by keeping {s}")
-                new_args = [a for a in args if a.shape == s]
+                args = [a for a in args if a.shape == s]
             return mean_stack(args)
         else:
             raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
@@ -447,7 +447,7 @@ def average_over_seed(run_groups: dict) -> list:
             s = shapes[0]
             if not all([sh == s for sh in shapes]):
                 print(f"Warning: Inconsistent shapes for averaging: {shapes}, trying to recover by keeping {s}")
-                new_args = [a for a in args if a.shape == s]
+                args = [a for a in args if a.shape == s]
             ret = std_stack(args)
         else:
             raise ValueError(f"Unsupported type for std computation: {type(args[0])}")
