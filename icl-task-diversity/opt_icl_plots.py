@@ -254,6 +254,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
             fig.tight_layout()
             output_path = icl_mse_dir / f"icl_step_{eval_step:04d}.png"
             fig.savefig(output_path, dpi=150, bbox_inches='tight')
+            output_path = icl_mse_dir / f"icl_step_{baseline_suffix}_{eval_step:04d}.pdf"
+            fig.savefig(output_path, bbox_inches='tight')
             # Print ylims
             print(f"Step {eval_step}: ylims = {ax.get_ylim()}")
             plt.close(fig)
