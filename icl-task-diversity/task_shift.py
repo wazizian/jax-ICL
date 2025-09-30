@@ -13,6 +13,7 @@ import equinox as eqx
 from functools import partial
 import yaml
 from scipy.optimize import curve_fit
+from tqdm import tqdm
 
 from loading import load_log_with_safetensors
 
@@ -437,17 +438,23 @@ def average_over_seed(run_groups: dict) -> list:
     FAST=False
     for optimize_key, runs in run_groups.items():
         if not FAST:
-            res = jax.tree.map(avg_func, *[run for run in runs])
-            std_res = jax.tree.map(std_func, *[run for run in runs])
-            log = res['log']
-            for key in log.keys():
-                if isinstance(log[key], dict):
-                    new_dict = {}
-                    for metric_name in log[key].keys():
-                        if "Std" not in metric_name and f"{metric_name}_Std" not in log[key]:
-                            std_values = std_res['log'][key][metric_name]
-                            new_dict[f"{metric_name}_Std"] = std_values
-                    log[key].update(new_dict)
+            new_log = {}
+            for task_name, metrics in tqdm(runs[0]['log'].items()):
+                if task_name == "eval/step":
+                    new_log[task_name] = runs[0]['log']["eval/step"]
+                    continue
+                new_log[task_name] = {}
+                for metric_name, values in tqdm(metrics.items(), leave=False, desc=f"Processing {task_name}"):
+                    if "Std" in metric_name:
+                        continue
+                    metric_values = []
+                    for run in runs:
+                        if task_name in run['log'] and metric_name in run['log'][task_name]:
+                            metric_values.append(run['log'][task_name][metric_name])
+                    new_log[task_name][metric_name] = avg_func(*metric_values)
+                    new_log[task_name][f"{metric_name}_Std"] = std_func(*metric_values)
+            res = runs[0].copy()
+            res['log'] = new_log
         else:
             res = runs[0]
         new_runs.append(res)

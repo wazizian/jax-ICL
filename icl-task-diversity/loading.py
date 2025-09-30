@@ -207,6 +207,8 @@ def load_log_with_safetensors(run_path: Path) -> dict:
     start_time = time.time()
     with open(log_path, "r") as f:
         log = json.load(f)
+
+    log = {'eval/step': log['eval/step']}
     
     # Check if safetensor eval results exist and try to use them
     if eval_results_dir.exists():
