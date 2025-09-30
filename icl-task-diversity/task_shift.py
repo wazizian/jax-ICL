@@ -396,9 +396,19 @@ def average_over_seed(run_groups: dict) -> list:
         elif isinstance(args[0], list):
             #print(f"Got lists with {len(args[0])} elements and {len(args)} args")
             new_args = [jnp.array(a) for a in args]
+            shapes = [a.shape for a in new_args]
+            s = shapes[0]
+            if not all([sh == s for sh in shapes]):
+                print(f"Warning: Inconsistent shapes for averaging: {shapes}, trying to recover by keeping {s}")
+                new_args = [a for a in new_args if a.shape == s]
             return mean_stack(new_args)
         elif isinstance(args[0],jnp.ndarray):
             #print(f"Got jax arrays with shape {args[0].shape} and {len(args)} args")
+            shapes = [a.shape for a in new_args]
+            s = shapes[0]
+            if not all([sh == s for sh in shapes]):
+                print(f"Warning: Inconsistent shapes for averaging: {shapes}, trying to recover by keeping {s}")
+                new_args = [a for a in new_args if a.shape == s]
             return mean_stack(args)
         else:
             raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
@@ -426,8 +436,18 @@ def average_over_seed(run_groups: dict) -> list:
             ret = std(jnp.array(args))
         elif isinstance(args[0], list):
             new_args = [jnp.array(a) for a in args]
+            shapes = [a.shape for a in new_args]
+            s = shapes[0]
+            if not all([sh == s for sh in shapes]):
+                print(f"Warning: Inconsistent shapes for averaging: {shapes}, trying to recover by keeping {s}")
+                new_args = [a for a in new_args if a.shape == s]
             ret =  std_stack(new_args)
         elif isinstance(args[0],jax.Array):
+            shapes = [a.shape for a in new_args]
+            s = shapes[0]
+            if not all([sh == s for sh in shapes]):
+                print(f"Warning: Inconsistent shapes for averaging: {shapes}, trying to recover by keeping {s}")
+                new_args = [a for a in new_args if a.shape == s]
             ret = std_stack(args)
         else:
             raise ValueError(f"Unsupported type for std computation: {type(args[0])}")
