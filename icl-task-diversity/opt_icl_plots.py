@@ -166,8 +166,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 std_by_pos = std_by_pos[burn_in:]
                             # avoid shape mismatches
                             if len(std_by_pos) == len(mse_by_position):
-                                lower = mse_by_position - std_by_pos
-                                upper = mse_by_position + std_by_pos
+                                lower = mse_by_position / std_by_pos
+                                upper = mse_by_position * std_by_pos
                                 ax.fill_between(positions, lower, upper, color=color, alpha=0.2)
 
             ax.set_xlabel("Context Length", fontsize=FONT_SIZE)

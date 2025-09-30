@@ -371,19 +371,19 @@ def average_over_seed(run_groups: dict) -> list:
 
     @eqx.filter_jit
     def mean(a, axis=None):
-        return jnp.mean(a, axis=axis)
+        return jnp.exp(jnp.mean(jnp.log(a), axis=axis))
 
     @eqx.filter_jit
     def old_mean_stack(args):
         new_args =jnp.stack([a for a in args], axis=0)
-        return jnp.mean(new_args, axis=0)
+        return mean(new_args, axis=0)
 
     @eqx.filter_jit
     def mean_stack(args):
         ret = jnp.zeros_like(args[0])
         for a in args:
-            ret = ret + a
-        return ret / len(args)
+            ret = ret + jnp.log(a)
+        return jnp.exp(ret / len(args))
 
     def avg_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
@@ -403,19 +403,20 @@ def average_over_seed(run_groups: dict) -> list:
             raise ValueError(f"Unsupported type for averaging: {type(args[0])}")
     @eqx.filter_jit
     def std(a, axis=None):
-        return jnp.std(a, axis=axis)
+        return jnp.exp(jnp.std(jnp.log(a), axis=axis))
     @eqx.filter_jit
     def old_std_stack(args):
         new_args =jnp.stack([a for a in args], axis=0)
-        return jnp.std(new_args, axis=0)
+        return std(new_args, axis=0)
 
     @eqx.filter_jit
     def std_stack(args):
         ret = jnp.zeros_like(args[0])
-        mean = mean_stack(args)
+        mean = jnp.log(mean_stack(args))
         for a in args:
-            ret = ret + (a - mean) ** 2
-        return jnp.sqrt(ret / len(args))
+            new_a = jnp.log(a)
+            ret = ret + (new_a - mean) ** 2
+        return jnp.exp(jnp.sqrt(ret / len(args)))
 
     def std_func(*args):
         if isinstance(args[0], (str, pathlib.Path)):
@@ -433,7 +434,7 @@ def average_over_seed(run_groups: dict) -> list:
         return ret
 
     new_runs = []
-    FAST=False
+    FAST=True
     for optimize_key, runs in run_groups.items():
         if not FAST:
             res = jax.tree.map(avg_func, *[run for run in runs])
