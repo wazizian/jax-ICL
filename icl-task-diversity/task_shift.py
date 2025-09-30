@@ -434,7 +434,7 @@ def average_over_seed(run_groups: dict) -> list:
         return ret
 
     new_runs = []
-    FAST=True
+    FAST=False
     for optimize_key, runs in run_groups.items():
         if not FAST:
             res = jax.tree.map(avg_func, *[run for run in runs])
