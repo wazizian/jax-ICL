@@ -146,10 +146,12 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
 
                         # MSE by position (already normalized in your helper)
                         mse_by_position = normalize_error_values(values[step_idx])
+                        std_series = metrics.get(f"{metric_name}_Std")
                         if mse_by_position.ndim == 0:
-                            print(f"Careful: metric {metric_name} for task {task_name} at step {eval_step} is a scalar, trying to recover...")
                             new_metric_name = f"{baseline_type} | {method}"
+                            print(f"Careful: metric {metric_name} for task {task_name} at step {eval_step} is a scalar, trying to recover with {new_metric_name}")
                             mse_by_position = normalize_error_values(metrics[new_metric_name][step_idx])
+                            std_series = metrics.get(f"{new_metric_name}_Std")
                             if mse_by_position.ndim == 0:
                                 print(f"Warning: still a scalar, skipping this metric.")
                                 continue
@@ -166,7 +168,6 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
                                 color=color, linestyle=style, linewidth=2)
 
                         # fill_between with correctly sliced std (fixes the step_idx indexing gotcha)
-                        std_series = metrics.get(f"{metric_name}_Std")
                         if std_series is not None and step_idx < len(std_series):
                             std_by_pos = np.array(std_series[step_idx])
                             if "ARMA" in task_name:

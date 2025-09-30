@@ -38,13 +38,13 @@ training:
   lr: 1.0e-4
   schedule: triangle
   warmup_steps: 10
-  total_steps: 20
+  total_steps: 10
   weight_decay: 0.01
   normalize_weights: false
 
 eval:
-  n_samples: 16
-  batch_size: 8
+  n_samples: 2048
+  batch_size: 256
   data_seed: 104
   task_seed: 105
   noise_seed: 106
