@@ -29,7 +29,7 @@ def format_task_name_for_display(task_name, metric_name):
     name = f"{task_name} ({splitted_metric[0]})"
     return name
 
-def plot_opt_icl_plots(run_paths: list, output_dir: Path = None, run_labels: list = None, optimize_params: list = None):
+def plot_opt_icl_plots(run_paths: list, output_dir: Path = None, run_labels: list = None, optimize_params: list = None, ymin: float = None, ymax: float = None):
     """Plot ICL performance for multiple runs with parameter optimization."""
     print(f"Calling load_all_logs_with_param_optimization with runs: {run_paths} and optimize_params: {optimize_params}")
     all_logs = load_all_logs_with_param_optimization(run_paths, optimize_params=optimize_params, baseline_type='True', run_labels=run_labels)
@@ -39,12 +39,12 @@ def plot_opt_icl_plots(run_paths: list, output_dir: Path = None, run_labels: lis
 
     for label in run_labels:
         log = all_logs[label]
-        plot_icl_for_all_steps(log, run_id=label, output_dir=run_paths[0])
+        plot_icl_for_all_steps(log, run_id=label, output_dir=run_paths[0], ymin=ymin, ymax=ymax)
 
 FONT_SIZE = 28
 
 
-def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
+def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin: float = None, ymax: float = None):
     """Plot ICL performance for all evaluation steps and save each step as a separate file."""
     eval_steps = log.get("eval/step", [])
     if not eval_steps:
@@ -125,6 +125,8 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None):
         # Generate plots for each evaluation step
         for step_idx, eval_step in enumerate(eval_steps):
             fig, ax = plt.subplots(figsize=(14, 8))
+            if ymin is not None and ymax is not None:
+                ax.set_ylim(ymin, ymax)
 
             for task_name, metrics in eval_metrics.items():
                 for metric_name, values in metrics.items():

@@ -161,6 +161,21 @@ Examples:
         help='Generate ICL plots for all evaluation steps (MSE and RelErr vs context length)'
     )
 
+    parser.add_argument(
+        '--ymin',
+        nargs='?',
+        type=float,
+        default=None,
+        help='Set minimum y-axis limit for loss plots',
+        )
+    parser.add_argument(
+        '--ymax',
+        nargs='?',
+        type=float,
+        default=None,
+        help='Set maximum y-axis limit for loss plots',
+        )
+
     args = parser.parse_args()
     
     # Handle shift analysis mode
@@ -254,7 +269,7 @@ Examples:
             if multirun_id:
                 multirun_path = Path("outputs/multirun") / multirun_id
                 if multirun_path.exists():
-                    plot_opt_icl_plots([multirun_path], run_labels=custom_names, optimize_params=optimize_params)
+                    plot_opt_icl_plots([multirun_path], run_labels=custom_names, optimize_params=optimize_params, ymin=args.ymin, ymax=args.ymax)
                 else:
                     print(f"Multirun directory not found: {multirun_path}")
             else:
