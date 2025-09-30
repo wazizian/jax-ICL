@@ -112,6 +112,9 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
             for mn in metrics.keys()
             if (f" | {baseline_type}" in mn) and ("(RelErr)" not in mn) and ("Std" not in mn) and ("True" not in method_from_metric(mn)) and ("Corrected" not in method_from_metric(mn))})
 
+        if len(all_methods) == 1:
+            all_methods.append("Ridge")
+
         #linestyles_cycle = ['--', '-.', ':', '-']
         linestyles_cycle = [
             (0, (1, 3)),         # dotted:  . . . . .
@@ -131,7 +134,7 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
             for task_name, metrics in eval_metrics.items():
                 for metric_name, values in metrics.items():
                     # keep your filters
-                    if (f" | {baseline_type}" in metric_name
+                    if (((f" | {baseline_type}" in metric_name) or (metric_name == f"{baseline_type} | Ridge"))
                         and "(RelErr)" not in metric_name
                         and "Std" not in metric_name
                         and values is not None and step_idx < len(values)):
@@ -140,7 +143,10 @@ def plot_icl_for_all_steps(log: dict, run_id: str, output_dir: Path = None, ymin
                         if "(True)" in metric_name or "Test tasks" in task_name:
                             continue
 
-                        method = method_from_metric(metric_name)
+                        if metric_name == f"{baseline_type} | Ridge":
+                            method = "Ridge"
+                        else:
+                            method = method_from_metric(metric_name)
                         if method not in all_methods:
                             continue
                         color  = task_to_color[task_name]
