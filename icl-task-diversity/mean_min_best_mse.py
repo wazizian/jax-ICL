@@ -789,7 +789,7 @@ def process_loaded_data_for_baseline_with_prefixes(loaded_data: dict, baseline_t
         for key, value in log.items():
             if key.startswith("eval/") and key != "eval/step":
                 for metric_name, metric_values in value.items():
-                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and metric_values:
+                    if f"Transformer | {baseline_type}" in metric_name and "(RelErr)" not in metric_name and metric_values is not None:
                         # Get the first non-empty MSE values to check length
                         first_values = normalize_error_values(metric_values[0])
                         if first_values is not None and len(first_values) > 0:
