@@ -379,7 +379,7 @@ class NoisyLinearRegression:
             tasks = self.task_pool[idxs]
             # log_weights = self.weights[idxs] 
             log_weights = task_log_weights(tasks, self.task_center, self.task_scale, self.clip, 
-                                         self.distrib_name, self.distrib_param, self.use_weights, reduce_axis=1, fixed_support=self.fixed_support)
+                                         self.distrib_name, self.distrib_param, use_weights=self.use_weights, reduce_axis=1, fixed_support=self.fixed_support)
             #weights = jax.nn.softmax(log_weights, axis=0) * self.batch_size  # Scale weights to match batch size
         else:
             shape = self.batch_size, self.n_dims, 1
