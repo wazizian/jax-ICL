@@ -1,90 +1,74 @@
 from __future__ import annotations
 
-import hashlib
-import shutil
+import os
+import subprocess
 from pathlib import Path
-from typing import Iterable, Dict, List, Tuple
+from typing import Iterable
 from tqdm import tqdm
 
 
-def copy_and_verify_files(
-    paths: Iterable[str | Path],
-    target_dir: str | Path,
-) -> Dict[Path, Path]:
+def rsync_move_dirs(
+    source_dirs: Iterable[str | Path],
+    target_root: str | Path,
+    *,
+    overwrite: bool = False,   # if False, refuse when target/<name> exists
+) -> None:
     """
-    Copy files to `target_dir` with a tqdm progress bar and verify by SHA-256.
+    Move each directory in `source_dirs` into `target_root` using one `rsync` per dir.
 
-    - No filename auto-suffixing: raises if a destination path already exists.
-    - Uses shutil.copy2 to preserve basic metadata.
+    - Uses: rsync -a --remove-source-files src_dir/ target_root/src_dir.name/
+    - If overwrite=False, raises if the destination directory already exists.
+    - After rsync, removes empty source directories (since --remove-source-files leaves dirs).
 
-    Returns
-    -------
-    dict[Path, Path]
-        Mapping from source path -> destination path.
-
-    Raises
-    ------
-    FileNotFoundError, ValueError, FileExistsError, RuntimeError
+    Requires `rsync` on PATH.
     """
-    # Normalize & validate sources
-    src_files: List[Path] = []
-    for p in paths:
-        p = Path(p)
-        if not p.exists():
-            raise FileNotFoundError(f"Source does not exist: {p}")
-        if not p.is_file():
-            raise ValueError(f"Not a file: {p}")
-        src_files.append(p)
+    target_root = Path(target_root)
+    target_root.mkdir(parents=True, exist_ok=True)
 
-    # Prepare destination dir
-    target = Path(target_dir)
-    target.mkdir(parents=True, exist_ok=True)
+    src_dirs = [Path(d) for d in source_dirs]
+    for s in src_dirs:
+        if not s.exists():
+            raise FileNotFoundError(f"Source does not exist: {s}")
+        if not s.is_dir():
+            raise ValueError(f"Not a directory: {s}")
 
-    # Plan destinations and ensure no collisions/overwrites
-    mapping: Dict[Path, Path] = {}
-    for src in src_files:
-        dst = target / src.name
-        if dst.exists():
-            raise FileExistsError(f"Destination already exists, refusing to overwrite: {dst}")
-        mapping[src] = dst
+    for s in tqdm(src_dirs, desc="Moving directories (rsync)", unit="dir"):
+        dst = target_root / s.name
+        if not overwrite and dst.exists():
+            raise FileExistsError(f"Destination already exists: {dst}")
 
-    # Copy with progress bar
-    for src in tqdm(src_files, desc="Copying files", unit="file"):
-        shutil.copy2(src, mapping[src])
+        dst.mkdir(parents=True, exist_ok=True)
 
-    # Helper: SHA-256
-    def sha256(path: Path, chunk: int = 1 << 20) -> str:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for block in iter(lambda: f.read(chunk), b""):
-                h.update(block)
-        return h.hexdigest()
+        # One rsync per directory; trailing slashes copy contents into the named folder.
+        cmd = ["rsync", "-a", "--remove-source-files", "--", str(s) + "/", str(dst) + "/"]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            raise RuntimeError("rsync not found. Install it and ensure it's on your PATH.")
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"rsync failed for {s}:\n{e.stderr.decode(errors='ignore')}") from e
 
-    # Verify by existence, size, then SHA-256
-    failures: List[Tuple[Path, str]] = []
-    for src, dst in tqdm(mapping.items(), desc="Verifying copies", unit="file"):
-        if not dst.exists():
-            failures.append((src, "destination_missing"))
-            continue
-        if src.stat().st_size != dst.stat().st_size:
-            failures.append((src, "size_mismatch"))
-            continue
-        if sha256(src) != sha256(dst):
-            failures.append((src, "hash_mismatch"))
-            continue
+        # Clean up now-empty directories under s (rsync leaves empty dirs).
+        # Walk bottom-up so children are removed before parents.
+        for root, dirs, files in os.walk(s, topdown=False):
+            if not dirs and not files:
+                try:
+                    Path(root).rmdir()
+                except OSError:
+                    pass
 
-    if failures:
-        details = "\n".join(f"- {s} -> {mapping.get(s, 'N/A')} [{reason}]" for s, reason in failures)
-        raise RuntimeError(f"Verification failed for {len(failures)} file(s):\n{details}")
+        # Finally, try to remove the source dir itself (if empty).
+        try:
+            s.rmdir()
+        except OSError:
+            # Not empty (e.g., excluded files) — leave it.
+            pass
 
-    return mapping
 
 if __name__ == '__main__':
-    mapping = copy_and_verify_files(
-        ["/data/a.csv", "/data/b.csv", "/reports/summary.pdf"],
+    rsync_move_dirs(
+        ["/data/projectA", "/data/projectB"],
         "/backup/2025-10-09",
+        overwrite=False,   # set True to merge into existing destinations
     )
-    print("Copied:")
-    for s, d in mapping.items():
-        print(f"{s} -> {d}")
 
