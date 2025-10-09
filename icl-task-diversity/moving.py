@@ -6,63 +6,43 @@ from pathlib import Path
 from typing import Iterable
 from tqdm import tqdm
 
+from __future__ import annotations
+from pathlib import Path
+from typing import Iterable
+import shlex
 
-def rsync_move_dirs(
+def print_rsync_batch(
     source_dirs: Iterable[str | Path],
     target_root: str | Path,
     *,
-    overwrite: bool = False,   # if False, refuse when target/<name> exists
-) -> None:
-    """
-    Move each directory in `source_dirs` into `target_root` using one `rsync` per dir.
+    move: bool = False,   # if True, add --remove-source-files + cleanup of empty dirs
+) -> str:
+    target = Path(target_root)
+    dirs = [Path(d) for d in source_dirs]
 
-    - Uses: rsync -a --remove-source-files src_dir/ target_root/src_dir.name/
-    - If overwrite=False, raises if the destination directory already exists.
-    - After rsync, removes empty source directories (since --remove-source-files leaves dirs).
+    rsync_base = 'rsync -a -vv --progress --info=progress2 --stats --human-readable'
+    if move:
+        rsync_base += ' --remove-source-files'
 
-    Requires `rsync` on PATH.
-    """
-    target_root = Path(target_root)
-    target_root.mkdir(parents=True, exist_ok=True)
+    header = [
+        "set -euo pipefail",
+        f'TARGET={shlex.quote(str(target))}',
+        'mkdir -p "$TARGET"',
+        f'RSYNC="{rsync_base}"',
+    ]
 
-    src_dirs = [Path(d) for d in source_dirs]
-    for s in src_dirs:
-        if not s.exists():
-            raise FileNotFoundError(f"Source does not exist: {s}")
-        if not s.is_dir():
-            raise ValueError(f"Not a directory: {s}")
+    lines = []
+    for d in dirs:
+        src_q = shlex.quote(str(d))  # IMPORTANT: no trailing slash -> creates $TARGET/<basename>
+        lines.append(f'$RSYNC -- {src_q} "$TARGET/"')
+        if move:
+            # remove any now-empty directories left behind
+            # (no-op if something excluded remains)
+            lines.append(f'find {src_q} -type d -empty -delete || true')
 
-    for s in tqdm(src_dirs, desc="Moving directories (rsync)", unit="dir"):
-        dst = target_root / s.name
-        if not overwrite and dst.exists():
-            raise FileExistsError(f"Destination already exists: {dst}")
-
-        dst.mkdir(parents=True, exist_ok=True)
-
-        # One rsync per directory; trailing slashes copy contents into the named folder.
-        cmd = ["rsync", "-a", "--remove-source-files", "--", str(s) + "/", str(dst) + "/"]
-        try:
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        except FileNotFoundError:
-            raise RuntimeError("rsync not found. Install it and ensure it's on your PATH.")
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"rsync failed for {s}:\n{e.stderr.decode(errors='ignore')}") from e
-
-        # Clean up now-empty directories under s (rsync leaves empty dirs).
-        # Walk bottom-up so children are removed before parents.
-        for root, dirs, files in os.walk(s, topdown=False):
-            if not dirs and not files:
-                try:
-                    Path(root).rmdir()
-                except OSError:
-                    pass
-
-        # Finally, try to remove the source dir itself (if empty).
-        try:
-            s.rmdir()
-        except OSError:
-            # Not empty (e.g., excluded files) — leave it.
-            pass
+    script = "bash -lc '" + "\\n".join(header + lines) + "'"
+    print(script)
+    return script
 
 
 if __name__ == '__main__':
